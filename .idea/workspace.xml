@@ -4,11 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1abdbeac-7beb-45f5-841a-539944b8a9cf" name="Changes" comment="init: openAGV">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/openagv/core.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/core.py" afterDir="false" />
+    <list default="true" id="1abdbeac-7beb-45f5-841a-539944b8a9cf" name="Changes" comment="feat(asset): asset types">
+      <change beforePath="$PROJECT_DIR$/openagv/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/openagv/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/openagv/modules/vision.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/modules/vision.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -104,7 +102,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1768982485962</updated>
-      <workItem from="1768982486966" duration="2265000" />
+      <workItem from="1768982486966" duration="2926000" />
     </task>
     <task id="LOCAL-00001" summary="init: openAGV">
       <option name="closed" value="true" />
@@ -114,7 +112,15 @@
       <option name="project" value="LOCAL" />
       <updated>1768984990693</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="feat(asset): asset types">
+      <option name="closed" value="true" />
+      <created>1768985592967</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1768985592967</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -122,7 +128,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="init: openAGV" />
-    <option name="LAST_COMMIT_MESSAGE" value="init: openAGV" />
+    <MESSAGE value="feat(asset): asset types" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat(asset): asset types" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/openAGV$main.coverage" NAME="main Coverage Results" MODIFIED="1768983877525" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />

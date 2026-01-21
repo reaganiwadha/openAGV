@@ -2,6 +2,7 @@ from typing import List, Any
 from semantic_kernel import Kernel
 from semantic_kernel.functions import kernel_function
 from .core import Agentable, AssetBin, UserInstruction
+from .stepper import Stepper, StepperState
 
 def _create_sk_plugin_wrapper(agentable: Agentable) -> Any:
     """
@@ -37,8 +38,9 @@ def _create_sk_plugin_wrapper(agentable: Agentable) -> Any:
             
     return wrapper
 
-class SKLoopExecutor:
+class SKLoopExecutor(Stepper):
     def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, uses: List[Agentable] = [], debug: bool = False):
+        super().__init__()
         self.asset_bin = asset_bin
         self.instruction = instruction
         self.uses = uses
@@ -57,29 +59,53 @@ class SKLoopExecutor:
 
     def start(self):
         """Starts the execution loop."""
-        print(f"[*] Starting SKLoopExecutor with instruction: '{self.instruction.text}'")
+        self.set_state(StepperState.PLANNING)
+        self.log(f"Starting execution with instruction: '{self.instruction.text}'")
         
         if self.debug:
-            print(f"[*] Loaded Plugins: {list(self.kernel.plugins.keys())}")
-            # Optional: Inspect plugin functions to verify registration
-            for plugin_name, plugin in self.kernel.plugins.items():
-                 print(f"    - Plugin '{plugin_name}' functions: {list(plugin.functions.keys())}")
+            self.log(f"Loaded Plugins: {list(self.kernel.plugins.keys())}", "DEBUG")
 
+        # Define high-level steps
+        self.add_steps([
+            ("Intent Recognition", "Understand what the user wants."),
+            ("Asset Retrieval", "Find the necessary assets."),
+            ("Execution", "Perform the requested action.")
+        ])
+        
         # In a real scenario, we would use:
         # await self.kernel.invoke_prompt(self.instruction.text)
         # using a registered ChatCompletionService.
         
         # For this PoC, we simulate the agent's reasoning process:
-        print("[*] (Mocking LLM Reasoning Process)")
+        self.log("(Mocking LLM Reasoning Process)", "DEBUG")
+        
+        # Step 1: Intent Recognition
+        self.start_next_step() # Intent Recognition
         
         # Simple keyword matching to simulate "intent recognition"
-        if "Analyze" in self.instruction.text and "chop" in self.instruction.text:
-            print(" -> Agent decided to find asset 'chop'...")
+        intent_analyze = "Analyze" in self.instruction.text
+        intent_chop = "chop" in self.instruction.text
+        
+        if intent_analyze and intent_chop:
+            self.log("Agent identified intent: Analyze 'chop' asset.")
+            self.complete_current_step()
+            
+            self.set_state(StepperState.EXECUTING)
+            
+            # Step 2: Asset Retrieval
+            self.start_next_step() # Asset Retrieval
+            self.log("Agent decided to find asset 'chop'...")
+            
             # Simulate calling the function
             asset_path = self.asset_bin.get_asset_path("chop")
-            print(f" -> Tool 'AssetBin.get_asset_path' returned: '{asset_path}'")
+            self.log(f"Tool 'AssetBin.get_asset_path' returned: '{asset_path}'")
             
             if asset_path and asset_path != "Asset not found":
+                self.complete_current_step()
+                
+                # Step 3: Execution
+                self.start_next_step() # Execution
+                
                 # Retrieve the actual asset object to check type compatibility
                 asset_obj = self.asset_bin.get_asset_by_path(asset_path)
                 
@@ -90,14 +116,22 @@ class SKLoopExecutor:
                 ), None)
                 
                 if analyzer:
-                    print(f" -> Agent decided to analyze '{asset_path}' (Type: {asset_obj.asset_type.name}) using {analyzer.__class__.__name__}...")
+                    self.log(f"Agent decided to analyze '{asset_path}' (Type: {asset_obj.asset_type.name}) using {analyzer.__class__.__name__}...")
                     result = analyzer.analyze_asset(asset_path)
-                    print(f" -> Tool '{analyzer.__class__.__name__}.analyze_asset' returned: '{result}'")
+                    self.log(f"Tool '{analyzer.__class__.__name__}.analyze_asset' returned: '{result}'")
+                    self.complete_current_step()
+                    self.set_state(StepperState.FINISHED)
                 else:
-                    print(f" -> Agent could not find a suitable analyzer tool for asset type {asset_obj.asset_type.name}.")
+                    self.log(f"Agent could not find a suitable analyzer tool for asset type {asset_obj.asset_type.name}.", "ERROR")
+                    self.fail_current_step("No suitable analyzer found.")
             else:
-                print(" -> Agent could not find the asset.")
+                self.log("Agent could not find the asset.", "ERROR")
+                self.fail_current_step("Asset not found.")
+                # Since asset retrieval failed, we can't really proceed to execution, but let's make sure state is consistent
+                self.set_state(StepperState.ERROR)
         else:
-            print(" -> Agent did not understand the instruction in this Mock implementation.")
+            self.log("Agent did not understand the instruction in this Mock implementation.", "WARNING")
+            self.fail_current_step("Intent not recognized.")
+            self.set_state(StepperState.FINISHED)
 
-        print("[*] Execution finished.")
+        self.log("Execution finished.")
