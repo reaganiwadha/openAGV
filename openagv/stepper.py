@@ -25,13 +25,14 @@ class Step:
     status: str = "PENDING"  # PENDING, IN_PROGRESS, COMPLETED, FAILED
 
 class Stepper:
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self.steps: List[Step] = []
         self.current_step_index: int = -1
         self._state: StepperState = StepperState.IDLE
         self.logs: List[LogEntry] = []
         self._callbacks: List[Callable[['Stepper'], None]] = []
         self._is_active: bool = False
+        self.debug = debug
 
     @property
     def state(self) -> StepperState:
@@ -59,6 +60,8 @@ class Stepper:
         """Add a log entry and notify callbacks."""
         entry = LogEntry(datetime.now(), message, level)
         self.logs.append(entry)
+        if self.debug:
+            print(f"[{level}] {message}")
         self._notify_on_change()
 
     def set_state(self, state: StepperState):

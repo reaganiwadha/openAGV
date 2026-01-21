@@ -3,32 +3,23 @@ from semantic_kernel import Kernel
 from semantic_kernel.functions import kernel_function, KernelArguments
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
-from semantic_kernel.contents.chat_history import ChatHistory
+from semantic_kernel.filters import FilterTypes, FunctionInvocationContext
 from .core import Agentable, AssetBin, UserInstruction, SystemInstruction
 from .stepper import Stepper, StepperState
 
-class StepperPlugin:
-    def __init__(self, stepper: Stepper):
-        self.stepper = stepper
-
-    @kernel_function(description="Update the current step being performed", name="advance_step")
-    def advance_step(self, name: str, description: str = ""):
-        self.stepper.advance_step(name, description)
-
 class SKLoopExecutor(Stepper):
     def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, chat_completion: OpenAIChatCompletion, uses: List[Agentable] = [], debug: bool = False):
-        super().__init__()
+        super().__init__(debug=debug)
         self.asset_bin = asset_bin
         self.user_instruction = instruction
-        self.system_instruction = SystemInstruction("You are a helpful AI assistant capable of analyzing and manipulating media assets. Always use 'advance_step' to announce what you are doing before you do it.")
+        self.system_instruction = SystemInstruction("You are a helpful AI assistant capable of analyzing and manipulating media assets.")
         self.uses = uses
-        self.debug = debug
         self.kernel = Kernel()
         
         self.kernel.add_service(chat_completion)
         
-        # Add StepperPlugin so the agent can report steps
-        self.kernel.add_plugin(StepperPlugin(self), plugin_name="Stepper")
+        # Register monitoring filter
+        self.kernel.add_filter(FilterTypes.FUNCTION_INVOCATION, self._monitoring_filter)
         
         # Add AssetBin directly as a plugin
         self.kernel.add_plugin(self.asset_bin, plugin_name="AssetBin")
@@ -37,6 +28,18 @@ class SKLoopExecutor(Stepper):
         for module in uses:
             name = module.__class__.__name__
             self.kernel.add_plugin(module, plugin_name=name)
+
+    async def _monitoring_filter(self, context: FunctionInvocationContext, next):
+        """Filter to monitor function invocations and update steps."""
+        func_name = context.function.name
+        plugin_name = context.function.plugin_name
+        
+        # Don't track the main chat loop or internal functions if any
+        # We also ignore if plugin_name is empty (often the case for the prompt function itself)
+        if plugin_name and plugin_name not in ["_sys", "Agent"]: 
+            self.advance_step(f"{plugin_name}.{func_name}", f"Agent is executing {func_name} from {plugin_name}")
+            
+        await next(context)
 
     def set_system_instruction(self, instruction: SystemInstruction):
         """Replace the default system instruction."""
