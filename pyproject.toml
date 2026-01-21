@@ -1,0 +1,10 @@
+[project]
+name = "openagv"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "ipykernel>=7.1.0",
+    "opentimelineio>=0.18.1",
+    "semantic-kernel>=1.36.0",
+]
