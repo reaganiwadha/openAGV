@@ -36,10 +36,18 @@ class SKLoopExecutor(Stepper):
         
         # Don't track the main chat loop or internal functions if any
         # We also ignore if plugin_name is empty (often the case for the prompt function itself)
-        if plugin_name and plugin_name not in ["_sys", "Agent"]: 
+        should_track = plugin_name and plugin_name not in ["_sys", "Agent"]
+        
+        if should_track:
             self.advance_step(f"{plugin_name}.{func_name}", f"Agent is executing {func_name} from {plugin_name}")
+            if self.debug:
+                args_str = ", ".join([f"{k}='{v}'" for k, v in context.arguments.items()])
+                self.log(f"Invoking {plugin_name}.{func_name} with args: {{{args_str}}}", "DEBUG")
             
         await next(context)
+        
+        if should_track and self.debug:
+            self.log(f"Result from {plugin_name}.{func_name}: {context.result}", "DEBUG")
 
     def set_system_instruction(self, instruction: SystemInstruction):
         """Replace the default system instruction."""

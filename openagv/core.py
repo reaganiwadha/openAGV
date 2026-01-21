@@ -1,4 +1,5 @@
 import opentimelineio as otio
+import os
 from typing import List, Optional, Any, Set
 from enum import Enum, auto
 from semantic_kernel.functions import kernel_function
@@ -54,7 +55,11 @@ class AssetBin(Agentable):
     def add(self, file_path: str, asset_type: Optional[AssetType] = None) -> Asset:
         """
         Adds an asset. If type is not provided, it attempts to guess from extension.
+        Throws FileNotFoundError if the file does not exist.
         """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Asset file not found: {file_path}")
+
         if asset_type is None:
             lower_path = file_path.lower()
             if lower_path.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):

@@ -5,6 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
     "ipykernel>=7.1.0",
+    "openai>=2.15.0",
     "opentimelineio>=0.18.1",
     "semantic-kernel>=1.36.0",
 ]
