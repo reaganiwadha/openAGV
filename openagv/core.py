@@ -1,26 +1,53 @@
 import opentimelineio as otio
-from typing import List, Optional, Any
-from semantic_kernel.functions import kernel_function
+from typing import List, Optional, Any, Set
+from enum import Enum, auto
+
+def agent_action(description: str):
+    """Decorator to mark a method as an action available to the agent."""
+    def decorator(func):
+        func._is_agent_action = True
+        func._agent_action_description = description
+        return func
+    return decorator
+
+class AssetType(Enum):
+    IMAGE = auto()
+    VIDEO = auto()
+    AUDIO = auto()
+    UNKNOWN = auto()
 
 class Agentable:
     """Base class for things that an agent can do actions upon."""
     def __init__(self, description: str):
         self.description = description
 
-    def to_semantic_kernel_plugin(self) -> Any:
-        """Returns the instance itself to be used as a plugin/class instance in SK."""
-        return self
-
 class Asset(Agentable):
     """Represents a media asset."""
-    def __init__(self, file_path: str):
-        super().__init__(f"Asset located at {file_path}")
+    def __init__(self, file_path: str, asset_type: AssetType):
+        super().__init__(f"{asset_type.name} Asset located at {file_path}")
         self.file_path = file_path
+        self.asset_type = asset_type
         self.metadata = {}
 
-    @kernel_function(description="Get the file path of the asset")
+    @agent_action(description="Get the file path of the asset")
     def get_file_path(self) -> str:
         return self.file_path
+    
+    @agent_action(description="Get the type of the asset")
+    def get_asset_type(self) -> str:
+        return self.asset_type.name
+
+class ImageAsset(Asset):
+    def __init__(self, file_path: str):
+        super().__init__(file_path, AssetType.IMAGE)
+
+class VideoAsset(Asset):
+    def __init__(self, file_path: str):
+        super().__init__(file_path, AssetType.VIDEO)
+
+class AudioAsset(Asset):
+    def __init__(self, file_path: str):
+        super().__init__(file_path, AssetType.AUDIO)
 
 class AssetBin(Agentable):
     """Holds a collection of assets."""
@@ -28,16 +55,41 @@ class AssetBin(Agentable):
         super().__init__("A bin containing media assets available for use.")
         self.assets: List[Asset] = []
 
-    def add(self, file_path: str) -> Asset:
-        asset = Asset(file_path)
+    def add(self, file_path: str, asset_type: Optional[AssetType] = None) -> Asset:
+        """
+        Adds an asset. If type is not provided, it attempts to guess from extension.
+        """
+        if asset_type is None:
+            lower_path = file_path.lower()
+            if lower_path.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
+                asset_type = AssetType.IMAGE
+            elif lower_path.endswith(('.mp4', '.mov', '.avi', '.mkv')):
+                asset_type = AssetType.VIDEO
+            elif lower_path.endswith(('.mp3', '.wav', '.aac', '.flac')):
+                asset_type = AssetType.AUDIO
+            else:
+                asset_type = AssetType.UNKNOWN
+
+        if asset_type == AssetType.IMAGE:
+            asset = ImageAsset(file_path)
+        elif asset_type == AssetType.VIDEO:
+            asset = VideoAsset(file_path)
+        elif asset_type == AssetType.AUDIO:
+            asset = AudioAsset(file_path)
+        else:
+            asset = Asset(file_path, asset_type)
+
         self.assets.append(asset)
         return asset
 
-    @kernel_function(description="List all assets in the bin")
+    def get_asset_by_path(self, path: str) -> Optional[Asset]:
+        return next((a for a in self.assets if a.file_path == path), None)
+
+    @agent_action(description="List all assets in the bin")
     def list_assets(self) -> str:
-        return ", ".join([a.file_path for a in self.assets])
+        return ", ".join([f"{a.file_path} ({a.asset_type.name})" for a in self.assets])
     
-    @kernel_function(description="Get an asset path by fuzzy filename match")
+    @agent_action(description="Get an asset path by fuzzy filename match")
     def get_asset_path(self, filename: str) -> str:
         for asset in self.assets:
             if filename in asset.file_path:
@@ -60,10 +112,14 @@ class Analysis:
 
 class Analyzer(Agentable):
     """Base class for things that analyze assets."""
-    def __init__(self, description: str = "Generic Analyzer"):
+    def __init__(self, description: str = "Generic Analyzer", supported_types: List[AssetType] = []):
         super().__init__(description)
+        self.supported_types = supported_types
 
-    @kernel_function(description="Analyze an asset given its file path")
+    def can_analyze(self, asset: Asset) -> bool:
+        return asset.asset_type in self.supported_types
+
+    @agent_action(description="Analyze an asset given its file path")
     def analyze_asset(self, asset_path: str) -> str:
         raise NotImplementedError
 
@@ -75,7 +131,7 @@ class OTIOTimeline(Agentable):
         self.track = otio.schema.Track()
         self.timeline.tracks.append(self.track)
     
-    @kernel_function(description="Add a clip to the timeline from an asset path")
+    @agent_action(description="Add a clip to the timeline from an asset path")
     def add_clip(self, asset_path: str, duration_frames: int = 100) -> str:
         clip = otio.schema.Clip(name=asset_path.split("/")[-1], source_range=otio.opentime.TimeRange(
             start_time=otio.opentime.RationalTime(0, 24),
@@ -84,6 +140,6 @@ class OTIOTimeline(Agentable):
         self.track.append(clip)
         return f"Added clip {asset_path} to timeline."
 
-    @kernel_function(description="Get a summary of the timeline")
+    @agent_action(description="Get a summary of the timeline")
     def get_summary(self) -> str:
         return f"Timeline '{self.timeline.name}' has {len(self.track)} items."

@@ -1,6 +1,41 @@
-from typing import List
+from typing import List, Any
 from semantic_kernel import Kernel
+from semantic_kernel.functions import kernel_function
 from .core import Agentable, AssetBin, UserInstruction
+
+def _create_sk_plugin_wrapper(agentable: Agentable) -> Any:
+    """
+    Dynamically creates a wrapper object for an Agentable instance 
+    that exposes methods decorated with @agent_action as SK kernel functions.
+    """
+    class PluginWrapper:
+        pass
+    
+    wrapper = PluginWrapper()
+    
+    # Inspect the agentable instance for methods with _is_agent_action
+    for name in dir(agentable):
+        # Skip private members
+        if name.startswith("_"):
+            continue
+            
+        attr = getattr(agentable, name)
+        
+        # Check if it's a method and has the marker
+        if callable(attr) and getattr(attr, "_is_agent_action", False):
+            description = getattr(attr, "_agent_action_description", "No description provided.")
+            
+            # Create a closure to capture the method
+            def make_proxy(method):
+                @kernel_function(description=description, name=name)
+                def proxy(*args, **kwargs):
+                    return method(*args, **kwargs)
+                return proxy
+            
+            # Attach the decorated proxy method to the wrapper
+            setattr(wrapper, name, make_proxy(attr))
+            
+    return wrapper
 
 class SKLoopExecutor:
     def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, uses: List[Agentable] = [], debug: bool = False):
@@ -10,14 +45,15 @@ class SKLoopExecutor:
         self.debug = debug
         self.kernel = Kernel()
         
-        # Add AssetBin as a plugin
-        # In SK 1.x, add_plugin can take an object with @kernel_function decorators
-        self.kernel.add_plugin(self.asset_bin, plugin_name="AssetBin")
+        # Wrap and add AssetBin
+        asset_bin_wrapper = _create_sk_plugin_wrapper(self.asset_bin)
+        self.kernel.add_plugin(asset_bin_wrapper, plugin_name="AssetBin")
         
-        # Add other modules as plugins
+        # Wrap and add other modules
         for module in uses:
             name = module.__class__.__name__
-            self.kernel.add_plugin(module, plugin_name=name)
+            module_wrapper = _create_sk_plugin_wrapper(module)
+            self.kernel.add_plugin(module_wrapper, plugin_name=name)
 
     def start(self):
         """Starts the execution loop."""
@@ -25,6 +61,9 @@ class SKLoopExecutor:
         
         if self.debug:
             print(f"[*] Loaded Plugins: {list(self.kernel.plugins.keys())}")
+            # Optional: Inspect plugin functions to verify registration
+            for plugin_name, plugin in self.kernel.plugins.items():
+                 print(f"    - Plugin '{plugin_name}' functions: {list(plugin.functions.keys())}")
 
         # In a real scenario, we would use:
         # await self.kernel.invoke_prompt(self.instruction.text)
@@ -41,14 +80,21 @@ class SKLoopExecutor:
             print(f" -> Tool 'AssetBin.get_asset_path' returned: '{asset_path}'")
             
             if asset_path and asset_path != "Asset not found":
-                # Find an analyzer
-                analyzer = next((m for m in self.uses if hasattr(m, 'analyze_asset')), None)
+                # Retrieve the actual asset object to check type compatibility
+                asset_obj = self.asset_bin.get_asset_by_path(asset_path)
+                
+                # Find an analyzer that supports this asset
+                analyzer = next((
+                    m for m in self.uses 
+                    if hasattr(m, 'analyze_asset') and hasattr(m, 'can_analyze') and m.can_analyze(asset_obj)
+                ), None)
+                
                 if analyzer:
-                    print(f" -> Agent decided to analyze '{asset_path}' using {analyzer.__class__.__name__}...")
+                    print(f" -> Agent decided to analyze '{asset_path}' (Type: {asset_obj.asset_type.name}) using {analyzer.__class__.__name__}...")
                     result = analyzer.analyze_asset(asset_path)
                     print(f" -> Tool '{analyzer.__class__.__name__}.analyze_asset' returned: '{result}'")
                 else:
-                    print(" -> Agent could not find a suitable analyzer tool.")
+                    print(f" -> Agent could not find a suitable analyzer tool for asset type {asset_obj.asset_type.name}.")
             else:
                 print(" -> Agent could not find the asset.")
         else:
