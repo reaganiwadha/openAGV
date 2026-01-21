@@ -67,26 +67,23 @@ class Stepper:
         self._is_active = state not in [StepperState.IDLE, StepperState.FINISHED, StepperState.ERROR, StepperState.STOPPED]
         self._notify_on_change()
 
-    def add_step(self, name: str, description: str):
-        """Define a new step in the process."""
-        self.steps.append(Step(name, description))
-        self._notify_on_change()
-
-    def add_steps(self, steps_data: List[tuple[str, str]]):
-        """Define multiple new steps. Input is a list of (name, description) tuples."""
-        for name, desc in steps_data:
-            self.steps.append(Step(name, desc))
-        self._notify_on_change()
-
-    def start_next_step(self):
-        """Starts the next PENDING step in the list."""
-        next_index = self.current_step_index + 1
-        if next_index < len(self.steps):
-            self.current_step_index = next_index
-            self.steps[next_index].status = "IN_PROGRESS"
-            self._notify_on_change()
-        else:
-            self.log("No more steps to start.", "WARNING")
+    def advance_step(self, name: str, description: str = ""):
+        """
+        Completes the current step (if any) and starts a new step.
+        This is for agentic workflows where steps are determined dynamically.
+        """
+        # Complete previous step if it exists and is running
+        if self.current_step and self.current_step.status == "IN_PROGRESS":
+            self.complete_current_step()
+            
+        # Create and add new step
+        new_step = Step(name, description)
+        new_step.status = "IN_PROGRESS"
+        self.steps.append(new_step)
+        self.current_step_index = len(self.steps) - 1
+        
+        self.log(f"Advancing to step: {name}", "INFO")
+        self.set_state(StepperState.EXECUTING)
 
     def complete_current_step(self):
         """Mark the current step as COMPLETED."""

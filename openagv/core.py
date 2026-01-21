@@ -1,14 +1,10 @@
 import opentimelineio as otio
 from typing import List, Optional, Any, Set
 from enum import Enum, auto
+from semantic_kernel.functions import kernel_function
 
-def agent_action(description: str):
-    """Decorator to mark a method as an action available to the agent."""
-    def decorator(func):
-        func._is_agent_action = True
-        func._agent_action_description = description
-        return func
-    return decorator
+# Alias agent_action to kernel_function for direct SK compatibility
+agent_action = kernel_function
 
 class AssetType(Enum):
     IMAGE = auto()
@@ -96,10 +92,18 @@ class AssetBin(Agentable):
                 return asset.file_path
         return "Asset not found"
 
-class UserInstruction:
+class Instruction:
+    """Base class for instructions."""
+    def __init__(self, prompt: str):
+        self.prompt = prompt
+
+class SystemInstruction(Instruction):
+    """Represents a system instruction."""
+    pass
+
+class UserInstruction(Instruction):
     """Represents a user instruction/prompt."""
-    def __init__(self, text: str):
-        self.text = text
+    pass
 
 class Analysis:
     """The result of an analysis."""
