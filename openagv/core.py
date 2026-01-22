@@ -25,6 +25,7 @@ class Asset(Agentable):
         self.file_path = file_path
         self.asset_type = asset_type
         self.metadata = {}
+        self.analyses: List['Analysis'] = []
 
     @agent_action(description="Get the file path of the asset")
     def get_file_path(self) -> str:
@@ -33,6 +34,22 @@ class Asset(Agentable):
     @agent_action(description="Get the type of the asset")
     def get_asset_type(self) -> str:
         return self.asset_type.name
+
+    def add_analysis(self, analysis: 'Analysis'):
+        """Adds an analysis result to this asset."""
+        self.analyses.append(analysis)
+
+    def has_analysis_from(self, analyzer_name: str) -> bool:
+        """Checks if this asset has been analyzed by the given analyzer."""
+        return any(a.analyzer_name == analyzer_name for a in self.analyses)
+
+    @agent_action(description="Get a hint about which analyzers have processed this asset")
+    def get_analysis_hint(self) -> str:
+        """Returns a string describing the analysis state."""
+        if not self.analyses:
+            return "No analyses performed."
+        names = [a.analyzer_name for a in self.analyses]
+        return f"Analyzed by: {', '.join(names)}"
 
 class ImageAsset(Asset):
     def __init__(self, file_path: str):
@@ -112,17 +129,19 @@ class UserInstruction(Instruction):
 
 class Analysis:
     """The result of an analysis."""
-    def __init__(self, asset_path: str, content: Any):
+    def __init__(self, asset_path: str, content: Any, analyzer_name: str):
         self.asset_path = asset_path
         self.content = content
+        self.analyzer_name = analyzer_name
     
     def __repr__(self):
-        return f"<Analysis of {self.asset_path}: {self.content}>"
+        return f"<Analysis of {self.asset_path} by {self.analyzer_name}: {self.content}>"
 
 class Analyzer(Agentable):
     """Base class for things that analyze assets."""
-    def __init__(self, description: str = "Generic Analyzer", supported_types: List[AssetType] = []):
+    def __init__(self, name: str, description: str = "Generic Analyzer", supported_types: List[AssetType] = []):
         super().__init__(description)
+        self.name = name
         self.supported_types = supported_types
 
     def can_analyze(self, asset: Asset) -> bool:

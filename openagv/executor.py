@@ -1,6 +1,6 @@
-from typing import List, Any
+from typing import List
 from semantic_kernel import Kernel
-from semantic_kernel.functions import kernel_function, KernelArguments
+from semantic_kernel.functions import KernelArguments
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
 from semantic_kernel.filters import FilterTypes, FunctionInvocationContext

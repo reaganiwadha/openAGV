@@ -7,6 +7,7 @@ from ..core import Analyzer, agent_action, AssetType
 class ORVisionAnalyzer(Analyzer):
     def __init__(self, client: OpenAI, model: str):
         super().__init__(
+            name=f"ORVisionAnalyzer ({model})",
             description=f"Vision Analyzer using model {model}",
             supported_types=[AssetType.IMAGE, AssetType.VIDEO]
         )
