@@ -4,20 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1abdbeac-7beb-45f5-841a-539944b8a9cf" name="Changes" comment="feat(analyzer): deepgram + working PoC">
-      <change afterPath="$PROJECT_DIR$/.idea/dataSources.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/data_source_mapping.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/assets/aarn-giri-3tYZjGSBwbk-unsplash.jpg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/assets/andrew-small-EfhCUc_fjrU-unsplash.jpg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/assets/evie-s-w1JE5duY62M-unsplash.jpg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/assets/olia-gozha-9A_peGrSbZc-unsplash.jpg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/assets/sergey-shmidt-koy6FlCCy5s-unsplash.jpg" afterDir="false" />
+    <list default="true" id="1abdbeac-7beb-45f5-841a-539944b8a9cf" name="Changes" comment="gitignore">
       <change afterPath="$PROJECT_DIR$/examples/assets/softram.webm" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/assets/zoltan-tasi-yanhwFwyoaU-unsplash.jpg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sample2.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/openagv/core.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/core.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/openagv/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/executor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/openagv/modules/vision.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/modules/vision.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -129,7 +121,7 @@
       <workItem from="1768990626766" duration="858000" />
       <workItem from="1768991506385" duration="5140000" />
       <workItem from="1769009834254" duration="8514000" />
-      <workItem from="1769054616893" duration="3616000" />
+      <workItem from="1769054616893" duration="4474000" />
     </task>
     <task id="LOCAL-00001" summary="init: openAGV">
       <option name="closed" value="true" />
@@ -211,7 +203,23 @@
       <option name="project" value="LOCAL" />
       <updated>1769054188523</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="feat(persistence): SqliteAssetBin">
+      <option name="closed" value="true" />
+      <created>1769060135993</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1769060135993</updated>
+    </task>
+    <task id="LOCAL-00012" summary="gitignore">
+      <option name="closed" value="true" />
+      <created>1769060161882</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1769060161882</updated>
+    </task>
+    <option name="localTasksCounter" value="13" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -228,7 +236,9 @@
     <MESSAGE value="feat(analyzer): analyze result" />
     <MESSAGE value="feat(analyzer): direct asset comment" />
     <MESSAGE value="feat(analyzer): deepgram + working PoC" />
-    <option name="LAST_COMMIT_MESSAGE" value="feat(analyzer): deepgram + working PoC" />
+    <MESSAGE value="feat(persistence): SqliteAssetBin" />
+    <MESSAGE value="gitignore" />
+    <option name="LAST_COMMIT_MESSAGE" value="gitignore" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>

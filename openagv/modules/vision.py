@@ -1,6 +1,5 @@
 import base64
 import os
-from typing import Any
 from openai import OpenAI
 from ..core import Analyzer, agent_action, AssetType
 

@@ -4,7 +4,7 @@ from semantic_kernel.functions import KernelArguments
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
 from semantic_kernel.filters import FilterTypes, FunctionInvocationContext
-from .core import Agentable, AssetBin, UserInstruction, SystemInstruction, Analyzer
+from .core import Agentable, AssetBin, UserInstruction, SystemInstruction, Analyzer, Timeline
 from .stepper import Stepper, StepperState
 
 class SKLoopExecutor(Stepper):
@@ -13,6 +13,12 @@ class SKLoopExecutor(Stepper):
         self.asset_bin = asset_bin
         self.user_instruction = instruction
         self.system_instruction = SystemInstruction("You are a helpful AI assistant capable of analyzing and manipulating media assets.")
+        
+        # Validation: Only one Timeline allowed
+        timelines = [u for u in uses if isinstance(u, Timeline)]
+        if len(timelines) > 1:
+            raise ValueError("SKLoopExecutor only accepts one Timeline instance.")
+        
         self.uses = uses
         self.kernel = Kernel()
         
