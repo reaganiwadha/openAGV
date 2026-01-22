@@ -95,15 +95,9 @@ class SKLoopExecutor(Stepper):
         if len(self.chat_history) > 0:
             self.chat_history[0].content = instruction.prompt
 
-    def nudge(self, instruction: UserInstruction):
-        """Advances the action by adding a new user instruction."""
-        self.chat_history.add_user_message(instruction.prompt)
-        self.log(f"Nudged with: {instruction.prompt}")
-
-    async def start(self):
-        """Starts the execution loop using the real LLM."""
+    async def _execute_cycle(self):
+        """Executes a cycle of the LLM loop."""
         self.set_state(StepperState.PLANNING)
-        self.log(f"Starting execution...")
         
         if self.debug:
             self.log(f"Chat History: {len(self.chat_history)} messages", "DEBUG")
@@ -137,4 +131,14 @@ class SKLoopExecutor(Stepper):
             self.fail_current_step(str(e))
             self.set_state(StepperState.ERROR)
 
+    async def nudge(self, instruction: UserInstruction):
+        """Advances the action by adding a new user instruction."""
+        self.chat_history.add_user_message(instruction.prompt)
+        self.log(f"Nudged with: {instruction.prompt}")
+        await self._execute_cycle()
+
+    async def start(self):
+        """Starts the execution loop using the real LLM."""
+        self.log(f"Starting execution...")
+        await self._execute_cycle()
         self.log("Execution finished.")
