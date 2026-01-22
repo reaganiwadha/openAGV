@@ -28,6 +28,8 @@ class SKLoopExecutor(Stepper):
         for module in uses:
             name = module.__class__.__name__
             self.kernel.add_plugin(module, plugin_name=name)
+            if hasattr(module, "set_asset_bin"):
+                module.set_asset_bin(self.asset_bin)
 
     async def _monitoring_filter(self, context: FunctionInvocationContext, next):
         """Filter to monitor function invocations and update steps."""

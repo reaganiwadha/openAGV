@@ -13,8 +13,15 @@ class DeepgramAnalyzer(Analyzer):
         self.api_key = api_key
 
     @agent_action(description="Transcribes an audio/video asset to text")
-    async def analyze_asset(self, asset: Any) -> bool:
-        # Asset is Any to avoid circular import, but treated as Asset
+    async def analyze_asset(self, asset_id: str) -> bool:
+        if not self.asset_bin:
+             print(f"[DeepgramAnalyzer] Error: AssetBin not set.")
+             return False
+
+        asset = self.asset_bin.get_asset_by_id(asset_id)
+        if not asset:
+            print(f"[DeepgramAnalyzer] Error: Asset with ID {asset_id} not found.")
+            return False
         
         try:
             # Get audio path (converting video if necessary)

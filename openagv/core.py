@@ -3,6 +3,8 @@ import os
 import asyncio
 import subprocess
 import tempfile
+import json
+import hashlib
 from typing import List, Optional, Any, Set
 from enum import Enum, auto
 from semantic_kernel.functions import kernel_function
@@ -27,6 +29,7 @@ class Asset(Agentable):
         super().__init__(f"{asset_type.name} Asset located at {file_path}")
         self.file_path = file_path
         self.asset_type = asset_type
+        self.id = ""
         self.metadata = {}
         self.analyses: List['Analysis'] = []
 
@@ -91,21 +94,53 @@ class Asset(Agentable):
             # Run ffmpeg
             # ffmpeg -i input -vn -acodec libmp3lame -y output
             try:
-                process = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-i", local_path, "-vn", "-acodec", "libmp3lame", "-y", output_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                # Use asyncio.to_thread with subprocess.run to avoid NotImplementedError 
+                # on Windows SelectorEventLoop (common in Jupyter/embedded envs)
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["ffmpeg", "-i", local_path, "-vn", "-acodec", "libmp3lame", "-y", output_path],
+                    capture_output=True,
+                    check=False
                 )
-                stdout, stderr = await process.communicate()
                 
-                if process.returncode != 0:
-                    raise RuntimeError(f"FFmpeg failed: {stderr.decode()}")
+                if result.returncode != 0:
+                    raise RuntimeError(f"FFmpeg failed: {result.stderr.decode()}")
                 
                 return output_path
             except FileNotFoundError:
                 raise RuntimeError("ffmpeg not found in PATH.")
         
         raise ValueError(f"Cannot get audio format for asset type: {self.asset_type}")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "file_path": self.file_path,
+            "asset_type": self.asset_type.name,
+            "metadata": self.metadata,
+            "analyses": [a.to_dict() for a in self.analyses]
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Asset':
+        asset_type = AssetType[data["asset_type"]]
+        file_path = data["file_path"]
+        
+        # Instantiate specific subclass if appropriate, or generic Asset
+        if asset_type == AssetType.IMAGE:
+            asset = ImageAsset(file_path)
+        elif asset_type == AssetType.VIDEO:
+            asset = VideoAsset(file_path)
+        elif asset_type == AssetType.AUDIO:
+            asset = AudioAsset(file_path)
+        else:
+            asset = cls(file_path, asset_type)
+            
+        asset.id = data.get("id", "")
+        asset.metadata = data.get("metadata", {})
+        if "analyses" in data:
+            asset.analyses = [Analysis.from_dict(a) for a in data["analyses"]]
+        return asset
 
 class ImageAsset(Asset):
     def __init__(self, file_path: str):
@@ -125,6 +160,14 @@ class AssetBin(Agentable):
         super().__init__("A bin containing media assets available for use.")
         self.assets: List[Asset] = []
 
+    def _calculate_file_hash(self, file_path: str) -> str:
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            # Read and update hash string value in blocks of 4K
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+
     def add(self, file_path: str, asset_type: Optional[AssetType] = None) -> Asset:
         """
         Adds an asset. If type is not provided, it attempts to guess from extension.
@@ -137,7 +180,7 @@ class AssetBin(Agentable):
             lower_path = file_path.lower()
             if lower_path.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
                 asset_type = AssetType.IMAGE
-            elif lower_path.endswith(('.mp4', '.mov', '.avi', '.mkv')):
+            elif lower_path.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
                 asset_type = AssetType.VIDEO
             elif lower_path.endswith(('.mp3', '.wav', '.aac', '.flac')):
                 asset_type = AssetType.AUDIO
@@ -153,15 +196,19 @@ class AssetBin(Agentable):
         else:
             asset = Asset(file_path, asset_type)
 
+        asset.id = self._calculate_file_hash(file_path)
         self.assets.append(asset)
         return asset
 
     def get_asset_by_path(self, path: str) -> Optional[Asset]:
         return next((a for a in self.assets if a.file_path == path), None)
+    
+    def get_asset_by_id(self, asset_id: str) -> Optional[Asset]:
+        return next((a for a in self.assets if a.id == asset_id), None)
 
-    @agent_action(description="List all assets in the bin")
+    @agent_action(description="List all assets in the bin. Returns list of ID, filepath, and type.")
     def list_assets(self) -> str:
-        return ", ".join([f"{a.file_path} ({a.asset_type.name})" for a in self.assets])
+        return "\n".join([f"ID: {a.id} | File: {a.file_path} ({a.asset_type.name})" for a in self.assets])
     
     @agent_action(description="Get an asset path by fuzzy filename match")
     def get_asset_path(self, filename: str) -> str:
@@ -169,6 +216,47 @@ class AssetBin(Agentable):
             if filename in asset.file_path:
                 return asset.file_path
         return "Asset not found"
+
+    def to_dict(self) -> dict:
+        return {
+            "assets": [a.to_dict() for a in self.assets]
+        }
+
+    def json(self) -> str:
+        """Serializes the AssetBin to a JSON string."""
+        return json.dumps(self.to_dict(), indent=2)
+
+    def json_dump(self, file_path: str):
+        """Serializes the AssetBin to a JSON file."""
+        with open(file_path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'AssetBin':
+        bin = cls()
+        # We manually reconstruct assets avoiding the 'add' method's existence check
+        # because the files might not exist on this machine if we are just loading metadata,
+        # OR we assume they must exist. 
+        # The prompt implies we are just passing references around, so maybe we shouldn't strictly enforce existence on load?
+        # But 'Asset' constructor calls super which just sets description.
+        # However, 'add' checks existence. 
+        # Let's bypass 'add' and directly append to self.assets to avoid FileNotFoundError during simple deserialization
+        # (unless the user wants to validate).
+        # We will assume just data restoration.
+        if "assets" in data:
+            bin.assets = [Asset.from_dict(a) for a in data["assets"]]
+        return bin
+
+    @classmethod
+    def from_json(cls, json_str: str) -> 'AssetBin':
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_json_file(cls, file_path: str) -> 'AssetBin':
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return cls.from_dict(data)
 
 class Instruction:
     """Base class for instructions."""
@@ -193,12 +281,31 @@ class Analysis:
     def __repr__(self):
         return f"<Analysis of {self.asset_path} by {self.analyzer_name}: {self.content}>"
 
+    def to_dict(self) -> dict:
+        return {
+            "asset_path": self.asset_path,
+            "analyzer_name": self.analyzer_name,
+            "content": self.content
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Analysis':
+        return cls(
+            asset_path=data["asset_path"],
+            content=data["content"],
+            analyzer_name=data["analyzer_name"]
+        )
+
 class Analyzer(Agentable):
     """Base class for things that analyze assets."""
     def __init__(self, name: str, description: str = "Generic Analyzer", supported_types: List[AssetType] = []):
         super().__init__(description)
         self.name = name
         self.supported_types = supported_types
+        self.asset_bin: Optional[AssetBin] = None
+
+    def set_asset_bin(self, asset_bin: AssetBin):
+        self.asset_bin = asset_bin
 
     def can_analyze(self, asset: Asset) -> bool:
         return asset.asset_type in self.supported_types
