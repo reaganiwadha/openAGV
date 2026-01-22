@@ -1,24 +1,47 @@
-from typing import List
+from typing import List, Optional
 from semantic_kernel import Kernel
 from semantic_kernel.functions import KernelArguments
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
 from semantic_kernel.filters import FilterTypes, FunctionInvocationContext
+from semantic_kernel.contents import ChatHistory
 from .core import Agentable, AssetBin, UserInstruction, SystemInstruction, Analyzer, Timeline
 from .stepper import Stepper, StepperState
 
+VIDEO_EDITOR_SYSTEM_PROMPT = """
+You are an expert Autonomous Video Editor AI. Your goal is to understand the user's request and construct a high-quality video timeline using the available media assets.
+
+**Core Responsibilities:**
+1.  **Analyze Assets:** You must understand the content of the assets in the AssetBin. 
+    *   Use `list_possible_unanalyzed` to find assets needing analysis.
+    *   Use `get_analysis_sizes` to estimate content size.
+    *   Use `get_asset_analysis` to read analysis results.
+    *   **CRITICAL:** Do NOT re-analyze assets that already have sufficient analysis. Check metadata first.
+2.  **Construct Timeline:** Use the `Timeline` tools (e.g., `OTIOTimeline`) to assemble the video.
+    *   Add clips using `add_clip_by_id`.
+    *   Arrange them cohesively based on the user's story or intent.
+3.  **Autonomous Execution:** 
+    *   Do NOT ask the user for clarifying questions. Infer the best course of action.
+    *   If a specific detail is missing, use a reasonable default or creative choice.
+    *   Continue executing tools until the request is fully satisfied.
+
+**Constraint:**
+*   Only output a final text response when the task is effectively complete (the timeline is exported or ready).
+*   If you encounter an error, try to fix it yourself (e.g., try a different analyzer or asset).
+"""
+
 class SKLoopExecutor(Stepper):
-    def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, chat_completion: OpenAIChatCompletion, uses: List[Agentable] = [], debug: bool = False):
+    def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, chat_completion: OpenAIChatCompletion, uses: List[Agentable] = [], debug: bool = False, bug_user: bool = False):
         super().__init__(debug=debug)
         self.asset_bin = asset_bin
         self.user_instruction = instruction
-        self.system_instruction = SystemInstruction("You are a helpful AI assistant capable of analyzing and manipulating media assets.")
+        self.bug_user = bug_user
         
-        # Validation: Only one Timeline allowed
-        timelines = [u for u in uses if isinstance(u, Timeline)]
-        if len(timelines) > 1:
-            raise ValueError("SKLoopExecutor only accepts one Timeline instance.")
+        system_prompt = VIDEO_EDITOR_SYSTEM_PROMPT
+        if self.bug_user:
+            system_prompt += "\n\n**NOTE:** You ARE allowed to ask the user for clarification if absolutely necessary."
         
+        self.system_instruction = SystemInstruction(system_prompt)
         self.uses = uses
         self.kernel = Kernel()
         
@@ -38,6 +61,11 @@ class SKLoopExecutor(Stepper):
                 module.set_asset_bin(self.asset_bin)
             if isinstance(module, Analyzer):
                 self.asset_bin.register_analyzer(module)
+
+        # Initialize ChatHistory
+        self.chat_history = ChatHistory()
+        self.chat_history.add_system_message(self.system_instruction.prompt)
+        self.chat_history.add_user_message(self.user_instruction.prompt)
 
     async def _monitoring_filter(self, context: FunctionInvocationContext, next):
         """Filter to monitor function invocations and update steps."""
@@ -62,35 +90,45 @@ class SKLoopExecutor(Stepper):
     def set_system_instruction(self, instruction: SystemInstruction):
         """Replace the default system instruction."""
         self.system_instruction = instruction
+        # Reset chat history with new system prompt but keep user messages? 
+        # For simplicity, we just rebuild the system message at index 0
+        if len(self.chat_history) > 0:
+            self.chat_history[0].content = instruction.prompt
+
+    def nudge(self, instruction: UserInstruction):
+        """Advances the action by adding a new user instruction."""
+        self.chat_history.add_user_message(instruction.prompt)
+        self.log(f"Nudged with: {instruction.prompt}")
 
     async def start(self):
         """Starts the execution loop using the real LLM."""
         self.set_state(StepperState.PLANNING)
-        self.log(f"Starting real execution with instruction: '{self.user_instruction.prompt}'")
+        self.log(f"Starting execution...")
         
         if self.debug:
-            self.log(f"System Prompt: {self.system_instruction.prompt}", "DEBUG")
-            self.log(f"Loaded Plugins: {list(self.kernel.plugins.keys())}", "DEBUG")
+            self.log(f"Chat History: {len(self.chat_history)} messages", "DEBUG")
+
+        # Get the first service ID and the service itself
+        service_id = next(iter(self.kernel.services.keys()))
+        service = self.kernel.get_service(service_id=service_id)
 
         # Enable auto function calling
-        execution_settings = self.kernel.get_prompt_execution_settings_from_service_id(
-            next(iter(self.kernel.services.keys()))
-        )
+        execution_settings = self.kernel.get_prompt_execution_settings_from_service_id(service_id)
         execution_settings.function_choice_behavior = FunctionChoiceBehavior.Auto()
 
         try:
-            # Use KernelArguments to pass settings safely
-            arguments = KernelArguments(settings=execution_settings)
-            
-            # Simple prompt construction
-            full_prompt = f"{self.system_instruction.prompt}\n\nUser: {self.user_instruction.prompt}"
-            
-            result = await self.kernel.invoke_prompt(
-                prompt=full_prompt,
-                arguments=arguments
+            # Invoke using chat service directly, passing kernel for tool execution
+            result_content = await service.get_chat_message_content(
+                chat_history=self.chat_history,
+                settings=execution_settings,
+                kernel=self.kernel
             )
             
-            self.log(f"Final Agent Response: {result}")
+            # Add the agent's response to history
+            if result_content:
+                self.chat_history.add_message(result_content)
+
+            self.log(f"Final Agent Response: {result_content}")
             self.complete_current_step()
             self.set_state(StepperState.FINISHED)
             

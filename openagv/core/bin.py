@@ -126,6 +126,63 @@ class AssetBin(Agentable):
             return "No pending analyses found."
         return "\n".join(results)
 
+    @agent_action(description="Get the analyses for a specific asset by ID. Optional: limit character length.")
+    def get_asset_analysis(self, asset_id: str, max_chars: int = -1) -> str:
+        asset = self.get_asset_by_id(asset_id)
+        if not asset:
+            return "Asset not found."
+        
+        if not asset.analyses:
+            return f"No analyses found for asset {asset_id}."
+
+        output = []
+        for analysis in asset.analyses:
+            content_str = str(analysis.content)
+            if max_chars > 0 and len(content_str) > max_chars:
+                content_str = content_str[:max_chars] + "... (truncated)"
+            output.append(f"[{analysis.analyzer_name}]: {content_str}")
+        
+        return "\n".join(output)
+
+    @agent_action(description="Get all analyses for all assets. Optional: limit character length per analysis.")
+    def get_all_assets_analysis(self, max_chars: int = -1) -> str:
+        output = []
+        for asset in self.assets:
+            if asset.analyses:
+                asset_output = [f"--- Asset: {asset.file_path} (ID: {asset.id}) ---"]
+                for analysis in asset.analyses:
+                    content_str = str(analysis.content)
+                    if max_chars > 0 and len(content_str) > max_chars:
+                        content_str = content_str[:max_chars] + "... (truncated)"
+                    asset_output.append(f"[{analysis.analyzer_name}]: {content_str}")
+                output.append("\n".join(asset_output))
+        
+        if not output:
+            return "No analyses found in bin."
+        return "\n\n".join(output)
+
+    @agent_action(description="Get the estimated size (character count) of analyses for each asset.")
+    def get_analysis_sizes(self) -> str:
+        output = []
+        total_chars = 0
+        for asset in self.assets:
+            asset_chars = 0
+            details = []
+            for analysis in asset.analyses:
+                chars = len(str(analysis.content))
+                asset_chars += chars
+                details.append(f"{analysis.analyzer_name}: {chars} chars")
+            
+            if asset_chars > 0:
+                output.append(f"Asset: {asset.file_path} (ID: {asset.id}) | Total: {asset_chars} chars | Details: {', '.join(details)}")
+                total_chars += asset_chars
+        
+        if not output:
+            return "No analyses found."
+        
+        output.append(f"--- Grand Total: {total_chars} chars ---")
+        return "\n".join(output)
+
     def to_dict(self) -> dict:
         return {
             "assets": [a.to_dict() for a in self.assets]
