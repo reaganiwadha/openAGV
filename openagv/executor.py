@@ -4,7 +4,7 @@ from semantic_kernel.functions import KernelArguments
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
 from semantic_kernel.filters import FilterTypes, FunctionInvocationContext
-from .core import Agentable, AssetBin, UserInstruction, SystemInstruction
+from .core import Agentable, AssetBin, UserInstruction, SystemInstruction, Analyzer
 from .stepper import Stepper, StepperState
 
 class SKLoopExecutor(Stepper):
@@ -30,6 +30,8 @@ class SKLoopExecutor(Stepper):
             self.kernel.add_plugin(module, plugin_name=name)
             if hasattr(module, "set_asset_bin"):
                 module.set_asset_bin(self.asset_bin)
+            if isinstance(module, Analyzer):
+                self.asset_bin.register_analyzer(module)
 
     async def _monitoring_filter(self, context: FunctionInvocationContext, next):
         """Filter to monitor function invocations and update steps."""

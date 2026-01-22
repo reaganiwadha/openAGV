@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import json
 import hashlib
+import glob
+import sqlite3
 from typing import List, Optional, Any, Set
 from enum import Enum, auto
 from semantic_kernel.functions import kernel_function
@@ -32,6 +34,14 @@ class Asset(Agentable):
         self.id = ""
         self.metadata = {}
         self.analyses: List['Analysis'] = []
+        self._save_callback = None
+
+    def set_save_callback(self, callback):
+        self._save_callback = callback
+    
+    def _notify_save(self):
+        if self._save_callback:
+            self._save_callback(self)
 
     @agent_action(description="Get the file path of the asset")
     def get_file_path(self) -> str:
@@ -44,6 +54,7 @@ class Asset(Agentable):
     def append_analysis(self, analysis: 'Analysis'):
         """Adds an analysis result to this asset."""
         self.analyses.append(analysis)
+        self._notify_save()
 
     # Alias for backward compatibility if needed, or just use append
     add_analysis = append_analysis
@@ -159,6 +170,11 @@ class AssetBin(Agentable):
     def __init__(self):
         super().__init__("A bin containing media assets available for use.")
         self.assets: List[Asset] = []
+        self.analyzers: List['Analyzer'] = []
+
+    def register_analyzer(self, analyzer: 'Analyzer'):
+        """Registers an analyzer to be tracked by the bin."""
+        self.analyzers.append(analyzer)
 
     def _calculate_file_hash(self, file_path: str) -> str:
         sha256_hash = hashlib.sha256()
@@ -178,11 +194,11 @@ class AssetBin(Agentable):
 
         if asset_type is None:
             lower_path = file_path.lower()
-            if lower_path.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
+            if lower_path.endswith((".jpg", ".jpeg", ".png", ".bmp", ".gif")):
                 asset_type = AssetType.IMAGE
-            elif lower_path.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
+            elif lower_path.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
                 asset_type = AssetType.VIDEO
-            elif lower_path.endswith(('.mp3', '.wav', '.aac', '.flac')):
+            elif lower_path.endswith((".mp3", ".wav", ".aac", ".flac")):
                 asset_type = AssetType.AUDIO
             else:
                 asset_type = AssetType.UNKNOWN
@@ -197,8 +213,26 @@ class AssetBin(Agentable):
             asset = Asset(file_path, asset_type)
 
         asset.id = self._calculate_file_hash(file_path)
+        return self._on_asset_added(asset)
+
+    def _on_asset_added(self, asset: Asset) -> Asset:
+        """Hook called after an asset is created but before adding to list.
+        Subclasses can override this to implement persistence or duplicate checking."""
         self.assets.append(asset)
         return asset
+
+    def add_wildcard(self, pattern: str) -> List[Asset]:
+        """Adds assets using a wildcard pattern."""
+        files = glob.glob(pattern, recursive=True)
+        added_assets = []
+        for file_path in files:
+            if os.path.isfile(file_path):
+                try:
+                    asset = self.add(file_path)
+                    added_assets.append(asset)
+                except Exception:
+                    pass
+        return added_assets
 
     def get_asset_by_path(self, path: str) -> Optional[Asset]:
         return next((a for a in self.assets if a.file_path == path), None)
@@ -217,6 +251,36 @@ class AssetBin(Agentable):
                 return asset.file_path
         return "Asset not found"
 
+    @agent_action(description="List analyzers that can still be run on a specific asset (by ID)")
+    def list_possible_analyzers(self, asset_id: str) -> str:
+        asset = self.get_asset_by_id(asset_id)
+        if not asset:
+            return "Asset not found."
+        
+        possible = []
+        for analyzer in self.analyzers:
+            if analyzer.can_analyze(asset) and not asset.has_analysis_from(analyzer.name):
+                possible.append(analyzer.name)
+        
+        if not possible:
+            return "No pending analyzers for this asset."
+        return f"Possible analyzers for {asset.file_path}: {', '.join(possible)}"
+
+    @agent_action(description="List all assets and their pending analyzers")
+    def list_possible_unanalyzed(self) -> str:
+        results = []
+        for asset in self.assets:
+            possible = []
+            for analyzer in self.analyzers:
+                if analyzer.can_analyze(asset) and not asset.has_analysis_from(analyzer.name):
+                    possible.append(analyzer.name)
+            if possible:
+                results.append(f"Asset: {asset.file_path} (ID: {asset.id}) -> Pending: {', '.join(possible)}")
+        
+        if not results:
+            return "No pending analyses found."
+        return "\n".join(results)
+
     def to_dict(self) -> dict:
         return {
             "assets": [a.to_dict() for a in self.assets]
@@ -234,15 +298,6 @@ class AssetBin(Agentable):
     @classmethod
     def from_dict(cls, data: dict) -> 'AssetBin':
         bin = cls()
-        # We manually reconstruct assets avoiding the 'add' method's existence check
-        # because the files might not exist on this machine if we are just loading metadata,
-        # OR we assume they must exist. 
-        # The prompt implies we are just passing references around, so maybe we shouldn't strictly enforce existence on load?
-        # But 'Asset' constructor calls super which just sets description.
-        # However, 'add' checks existence. 
-        # Let's bypass 'add' and directly append to self.assets to avoid FileNotFoundError during simple deserialization
-        # (unless the user wants to validate).
-        # We will assume just data restoration.
         if "assets" in data:
             bin.assets = [Asset.from_dict(a) for a in data["assets"]]
         return bin
@@ -257,6 +312,56 @@ class AssetBin(Agentable):
         with open(file_path, 'r') as f:
             data = json.load(f)
         return cls.from_dict(data)
+
+class SqliteAssetBin(AssetBin):
+    """An AssetBin that persists to a SQLite database."""
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        super().__init__() 
+        self.description = f"A persistent bin (SQLite) at {db_path} containing media assets."
+        self._init_db()
+        self._load_assets()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS assets (
+                    id TEXT PRIMARY KEY,
+                    file_path TEXT,
+                    asset_type TEXT,
+                    data TEXT
+                )
+            """)
+
+    def _load_assets(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT data FROM assets")
+            self.assets = []
+            for row in cursor:
+                try:
+                    data = json.loads(row[0])
+                    asset = Asset.from_dict(data)
+                    asset.set_save_callback(self._persist_asset)
+                    self.assets.append(asset)
+                except Exception:
+                    pass
+
+    def _on_asset_added(self, asset: Asset) -> Asset:
+        existing = self.get_asset_by_id(asset.id)
+        if existing:
+            return existing
+        
+        asset.set_save_callback(self._persist_asset)
+        self.assets.append(asset)
+        self._persist_asset(asset)
+        return asset
+
+    def _persist_asset(self, asset: Asset):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO assets (id, file_path, asset_type, data)
+                VALUES (?, ?, ?, ?)
+            """, (asset.id, asset.file_path, asset.asset_type.name, json.dumps(asset.to_dict())))
 
 class Instruction:
     """Base class for instructions."""
