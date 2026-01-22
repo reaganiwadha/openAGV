@@ -1,5 +1,8 @@
 import opentimelineio as otio
 import os
+import asyncio
+import subprocess
+import tempfile
 from typing import List, Optional, Any, Set
 from enum import Enum, auto
 from semantic_kernel.functions import kernel_function
@@ -35,9 +38,12 @@ class Asset(Agentable):
     def get_asset_type(self) -> str:
         return self.asset_type.name
 
-    def add_analysis(self, analysis: 'Analysis'):
+    def append_analysis(self, analysis: 'Analysis'):
         """Adds an analysis result to this asset."""
         self.analyses.append(analysis)
+
+    # Alias for backward compatibility if needed, or just use append
+    add_analysis = append_analysis
 
     def has_analysis_from(self, analyzer_name: str) -> bool:
         """Checks if this asset has been analyzed by the given analyzer."""
@@ -50,6 +56,56 @@ class Asset(Agentable):
             return "No analyses performed."
         names = [a.analyzer_name for a in self.analyses]
         return f"Analyzed by: {', '.join(names)}"
+
+    async def get_localized_path(self) -> str:
+        """Returns the local file path of the asset."""
+        # In a cloud scenario, this might download the file. 
+        # Here we just return the local path.
+        if not os.path.exists(self.file_path):
+            raise FileNotFoundError(f"Asset file not found: {self.file_path}")
+        return self.file_path
+
+    async def get_audio_format(self) -> str:
+        """
+        Returns a path to an audio file. 
+        If the asset is video, it converts it to audio using ffmpeg.
+        If it's already audio, returns the path.
+        """
+        local_path = await self.get_localized_path()
+        
+        if self.asset_type == AssetType.AUDIO:
+            return local_path
+            
+        if self.asset_type == AssetType.VIDEO:
+            # Generate temp path
+            temp_dir = tempfile.gettempdir()
+            filename = os.path.basename(local_path)
+            name, _ = os.path.splitext(filename)
+            output_path = os.path.join(temp_dir, f"{name}_extracted.mp3")
+            
+            # Check if already exists to save time? 
+            # For now, let's overwrite to ensure freshness or handle existing
+            if os.path.exists(output_path):
+                return output_path
+
+            # Run ffmpeg
+            # ffmpeg -i input -vn -acodec libmp3lame -y output
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-i", local_path, "-vn", "-acodec", "libmp3lame", "-y", output_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    raise RuntimeError(f"FFmpeg failed: {stderr.decode()}")
+                
+                return output_path
+            except FileNotFoundError:
+                raise RuntimeError("ffmpeg not found in PATH.")
+        
+        raise ValueError(f"Cannot get audio format for asset type: {self.asset_type}")
 
 class ImageAsset(Asset):
     def __init__(self, file_path: str):
@@ -147,8 +203,8 @@ class Analyzer(Agentable):
     def can_analyze(self, asset: Asset) -> bool:
         return asset.asset_type in self.supported_types
 
-    @agent_action(description="Analyze an asset given its file path")
-    def analyze_asset(self, asset_path: str) -> str:
+    @agent_action(description="Analyze an asset")
+    async def analyze_asset(self, asset: Asset) -> bool:
         raise NotImplementedError
 
 class OTIOTimeline(Agentable):

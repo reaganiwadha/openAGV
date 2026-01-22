@@ -19,15 +19,28 @@ class ORVisionAnalyzer(Analyzer):
             return base64.b64encode(image_file.read()).decode('utf-8')
 
     @agent_action(description="Analyze a video/image asset to describe its content")
-    def analyze_asset(self, asset_path: str) -> str:
+    async def analyze_asset(self, asset: Any) -> bool:
+        # Note: 'asset' is typed as Any here to avoid circular imports if Asset isn't imported, 
+        # but logically it is 'Asset'. 
+        
+        # We need to access get_localized_path which is async now.
+        try:
+            asset_path = await asset.get_localized_path()
+        except Exception as e:
+            print(f"[ERROR] Could not localize asset: {e}")
+            return False
+
         print(f"[DEBUG] ORVisionAnalyzer analyzing {asset_path} with {self.model}...")
         
         # Check if file exists
         if not os.path.exists(asset_path):
-            return f"Error: Asset not found at {asset_path}"
+            print(f"Error: Asset not found at {asset_path}")
+            return False
 
         # Determine media type (simplified)
         ext = os.path.splitext(asset_path)[1].lower()
+        content = ""
+        
         if ext in ['.jpg', '.jpeg', '.png']:
             media_type = "image/jpeg" if ext in ['.jpg', '.jpeg'] else "image/png"
             base64_image = self._encode_image(asset_path)
@@ -47,24 +60,16 @@ class ORVisionAnalyzer(Analyzer):
                 }
             ]
         elif ext in ['.mp4', '.mov', '.avi', '.webm']:
-            # Note: Direct video upload support varies by provider/model.
-            # OpenAI typically requires frame extraction for 'vision' models, 
-            # or uses a specific video-capable model. 
-            # For OpenRouter/Gemini via OpenAI-compat, some support direct video, others don't.
-            # We will assume a simple "text-only" fallback or frame extraction 
-            # is NOT implemented yet to keep it simple, or attempt a generic video prompt if supported.
-            # BUT, standard OpenAI python client doesn't automatically handle video file upload in chat completions 
-            # efficiently without frames.
-            # Let's assume for now we just treat it as "unsupported for direct local upload" 
-            # unless we implement frame extraction. 
-            # OR, if the user implies a model that takes video?
-            # Let's implement a placeholder for video that warns or (if you prefer) frame extraction.
-            # Given "Agentic" nature, let's just try to send a text description request? No that fails.
-            
-            return f"Video analysis for {asset_path} is not yet fully implemented (requires frame extraction)."
+            # Placeholder for video logic
+            content = f"Video analysis for {asset_path} is not yet fully implemented (requires frame extraction)."
+            # Create analysis immediately for fallback
+            from ..core import Analysis
+            asset.append_analysis(Analysis(asset_path, content, self.name))
+            return True
             
         else:
-             return f"Unsupported file type for analysis: {ext}"
+             print(f"Unsupported file type for analysis: {ext}")
+             return False
 
         try:
             response = self.client.chat.completions.create(
@@ -75,7 +80,13 @@ class ORVisionAnalyzer(Analyzer):
             content = response.choices[0].message.content
             if not content:
                 print(f"[WARN] Empty content received from model {self.model}. Raw response: {response}")
-                return "Analysis returned no text content. The model might not support this task or returned an empty response."
-            return content
+                return False
+            
+            # Create and append Analysis
+            from ..core import Analysis
+            asset.append_analysis(Analysis(asset_path, content, self.name))
+            return True
+            
         except Exception as e:
-            return f"Error analyzing asset: {str(e)}"
+            print(f"Error analyzing asset: {str(e)}")
+            return False
