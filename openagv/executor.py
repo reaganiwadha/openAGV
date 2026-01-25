@@ -4,7 +4,7 @@ from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
 from semantic_kernel.filters import FilterTypes, FunctionInvocationContext
 from semantic_kernel.contents import ChatHistory
-from .core import Agentable, AssetBin, UserInstruction, SystemInstruction, Analyzer, Timeline
+from .core import Agentable, AssetBin, UserInstruction, SystemInstruction, Analyzer, Timeline, ChecklistManager
 from .stepper import Stepper, StepperState
 
 VIDEO_EDITOR_SYSTEM_PROMPT = """
@@ -19,7 +19,12 @@ You are an expert Autonomous Video Editor AI. Your goal is to understand the use
 2.  **Construct Timeline:** Use the `Timeline` tools (e.g., `OTIOTimeline`) to assemble the video.
     *   Add clips using `add_clip_by_id`.
     *   Arrange them cohesively based on the user's story or intent.
-3.  **Autonomous Execution:** 
+3.  **Memory & Checklist:** Use the `ChecklistManager` to maintain a persistent state.
+    *   **Plan:** At the start, use `set_checklist` to initialize a list of tasks. Pass a list of strings or a newline-separated plan.
+    *   **Track:** As you complete tasks, use `mark_task_completed` (passing the task number, e.g., 1, 2) to cross them off.
+    *   **Adapt:** Use `append_new_task` if you discover new necessary steps.
+    *   **Verify:** Before finishing, use `get_remaining_tasks` to ensure the list is empty/all tasks are done.
+4.  **Autonomous Execution:** 
     *   Do NOT ask the user for clarifying questions. Infer the best course of action.
     *   If a specific detail is missing, use a reasonable default or creative choice.
     *   Continue executing tools until the request is fully satisfied.
@@ -51,6 +56,10 @@ class SKLoopExecutor(Stepper):
         
         # Add AssetBin directly as a plugin
         self.kernel.add_plugin(self.asset_bin, plugin_name="AssetBin")
+        
+        # Add ChecklistManager as a plugin
+        self.checklist_manager = ChecklistManager()
+        self.kernel.add_plugin(self.checklist_manager, plugin_name="ChecklistManager")
         
         # Add other modules directly as plugins
         for module in uses:

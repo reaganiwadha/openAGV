@@ -6,6 +6,7 @@ from .assets import Asset, ImageAsset, VideoAsset, AudioAsset
 from .analyzer import Analyzer
 from .bin import AssetBin, SqliteAssetBin
 from .timeline import Timeline, OTIOTimeline
+from .memory import ChecklistManager
 
 __all__ = [
     "Agentable",
@@ -24,4 +25,5 @@ __all__ = [
     "SqliteAssetBin",
     "Timeline",
     "OTIOTimeline",
+    "ChecklistManager",
 ]
