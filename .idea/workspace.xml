@@ -4,12 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1abdbeac-7beb-45f5-841a-539944b8a9cf" name="Changes" comment="fix: stack">
+    <list default="true" id="1abdbeac-7beb-45f5-841a-539944b8a9cf" name="Changes" comment="fix: renderer example">
       <change afterPath="$PROJECT_DIR$/examples/assets/softram.webm" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/data_source_mapping.xml" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/openagv/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/openagv/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/sample2.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/sample2.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sample1.ipynb" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/sample2.ipynb" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -122,7 +122,10 @@
       <workItem from="1768991506385" duration="5140000" />
       <workItem from="1769009834254" duration="8514000" />
       <workItem from="1769054616893" duration="7279000" />
-      <workItem from="1769064795731" duration="2760000" />
+      <workItem from="1769064795731" duration="3966000" />
+      <workItem from="1769101930032" duration="746000" />
+      <workItem from="1769320973382" duration="48000" />
+      <workItem from="1769384349310" duration="297000" />
     </task>
     <task id="LOCAL-00001" summary="init: openAGV">
       <option name="closed" value="true" />
@@ -236,7 +239,31 @@
       <option name="project" value="LOCAL" />
       <updated>1769064158812</updated>
     </task>
-    <option name="localTasksCounter" value="15" />
+    <task id="LOCAL-00015" summary="fix: nudge">
+      <option name="closed" value="true" />
+      <created>1769079245141</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1769079245141</updated>
+    </task>
+    <task id="LOCAL-00016" summary="fix: renderer">
+      <option name="closed" value="true" />
+      <created>1769079926721</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1769079926721</updated>
+    </task>
+    <task id="LOCAL-00017" summary="fix: renderer example">
+      <option name="closed" value="true" />
+      <created>1769080358777</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1769080358777</updated>
+    </task>
+    <option name="localTasksCounter" value="18" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -257,7 +284,10 @@
     <MESSAGE value="gitignore" />
     <MESSAGE value="fix: core splitting" />
     <MESSAGE value="fix: stack" />
-    <option name="LAST_COMMIT_MESSAGE" value="fix: stack" />
+    <MESSAGE value="fix: nudge" />
+    <MESSAGE value="fix: renderer" />
+    <MESSAGE value="fix: renderer example" />
+    <option name="LAST_COMMIT_MESSAGE" value="fix: renderer example" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
