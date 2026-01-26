@@ -6,3 +6,6 @@ __pycache__/
 *.db
 *.webm
 *.mp4
+
+examples/playground/*.json
+examples/playground/*.otio
