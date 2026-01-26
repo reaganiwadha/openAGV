@@ -2,4 +2,5 @@ from .core import Agentable, Asset, AssetBin, UserInstruction, Analyzer, Analysi
 from .executor import SKLoopExecutor
 from .modules.vision import ORVisionAnalyzer
 from .modules.audio import DeepgramAnalyzer
+from .modules.textcard import TextCardGenerator
 from .stepper import Stepper, StepperState, Step

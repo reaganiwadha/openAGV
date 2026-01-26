@@ -9,3 +9,4 @@ __pycache__/
 
 examples/playground/*.json
 examples/playground/*.otio
+examples/playground/text_cards/

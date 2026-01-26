@@ -1,12 +1,14 @@
 import os
 import subprocess
-from typing import Optional
+from typing import Optional, List, Tuple
 import opentimelineio as otio
 from openagv.core.timeline import OTIOTimeline
+
 
 class FfmpegOTIORenderer:
     """
     Renders an OTIOTimeline to a video file using FFmpeg.
+    Supports multiple tracks with overlay compositing.
     This class is not Agentable.
     """
     def __init__(self):
@@ -24,103 +26,232 @@ class FfmpegOTIORenderer:
         """
         if not self.otio_timeline:
             raise ValueError("No OTIOTimeline set.")
-        
-        # Validate tracks and clips
-        # We assume the structure from OTIOTimeline class (single track)
-        track = self.otio_timeline.track
-        if not track:
-            # It's technically valid to have an empty timeline (renders nothing), 
-            # but usually we want content. We'll allow it but warn in logs if we had them.
-            return True
 
-        for i, item in enumerate(track):
-            if isinstance(item, otio.schema.Clip):
-                if not item.media_reference or not hasattr(item.media_reference, 'target_url') or not item.media_reference.target_url:
-                     raise ValueError(f"Clip {i} ({item.name}) has no valid media reference target_url.")
-                
-                path = item.media_reference.target_url
-                if not os.path.exists(path):
-                     raise ValueError(f"Clip {i} ({item.name}) references missing file: {path}")
-        
+        # Validate main track
+        track = self.otio_timeline.track
+        if track:
+            for i, item in enumerate(track):
+                if isinstance(item, otio.schema.Clip):
+                    if not item.media_reference or not hasattr(item.media_reference, 'target_url') or not item.media_reference.target_url:
+                        raise ValueError(f"Main track clip {i} ({item.name}) has no valid media reference target_url.")
+
+                    path = item.media_reference.target_url
+                    if not os.path.exists(path):
+                        raise ValueError(f"Main track clip {i} ({item.name}) references missing file: {path}")
+
+        # Validate overlay tracks
+        for track_name, overlay_track in self.otio_timeline._overlay_tracks.items():
+            for i, item in enumerate(overlay_track):
+                if isinstance(item, otio.schema.Clip):
+                    if not item.media_reference or not hasattr(item.media_reference, 'target_url') or not item.media_reference.target_url:
+                        raise ValueError(f"Overlay track '{track_name}' clip {i} ({item.name}) has no valid media reference.")
+
+                    path = item.media_reference.target_url
+                    if not os.path.exists(path):
+                        raise ValueError(f"Overlay track '{track_name}' clip {i} ({item.name}) references missing file: {path}")
+
         return True
+
+    def _is_image(self, path: str) -> bool:
+        """Check if file is an image based on extension."""
+        ext = os.path.splitext(path)[1].lower()
+        return ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']
+
+    def _get_track_clips_with_timing(self, track: otio.schema.Track) -> List[Tuple[float, float, str]]:
+        """
+        Extract clips from a track with their start times and durations.
+
+        Returns:
+            List of (start_time, duration, file_path) tuples
+        """
+        clips = []
+        current_time = 0.0
+
+        for item in track:
+            if isinstance(item, otio.schema.Gap):
+                # Gap just advances time
+                if item.source_range:
+                    current_time += item.source_range.duration.to_seconds()
+            elif isinstance(item, otio.schema.Clip):
+                duration = 5.0
+                if item.source_range:
+                    duration = item.source_range.duration.to_seconds()
+
+                path = item.media_reference.target_url
+                clips.append((current_time, duration, path))
+                current_time += duration
+
+        return clips
 
     def render(self, output_path: str = "otio.mp4"):
         """
         Renders the timeline to the specified output path using FFmpeg.
         Handling:
-        - Resizes all inputs to 1280x720 (with padding) to ensure concat works.
+        - Resizes all inputs to target resolution (with padding) to ensure concat works.
         - Handles images (loops them) and videos (seeks/trims).
+        - Supports overlay tracks - composites them on top of the base video.
         - Renders video stream only (for now) to avoid issues with mixed silent/sound assets.
         """
         self.validate()
-        
+
         if not self.otio_timeline or not self.otio_timeline.track or len(self.otio_timeline.track) == 0:
             print("Warning: Empty timeline, nothing to render.")
             return
 
+        # Use timeline dimensions or default
+        target_width = getattr(self.otio_timeline, 'width', 1280) or 1280
+        target_height = getattr(self.otio_timeline, 'height', 720) or 720
+        fps = getattr(self.otio_timeline, 'fps', 30) or 30
+
+        # Check if we have overlays
+        has_overlays = bool(self.otio_timeline._overlay_tracks)
+
+        if has_overlays:
+            self._render_with_overlays(output_path, target_width, target_height, fps)
+        else:
+            self._render_simple(output_path, target_width, target_height)
+
+    def _render_simple(self, output_path: str, target_width: int, target_height: int):
+        """Render without overlays - simple concatenation."""
         cmd = ['ffmpeg', '-y']
         filter_parts = []
         input_count = 0
-        
-        def is_image(path):
-            ext = os.path.splitext(path)[1].lower()
-            return ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']
 
         for item in self.otio_timeline.track:
             if isinstance(item, otio.schema.Clip):
                 path = item.media_reference.target_url
-                
-                # Default duration if not specified
+
                 start_time = 0.0
                 duration = 5.0
-                
+
                 if item.source_range:
                     start_time = item.source_range.start_time.to_seconds()
                     duration = item.source_range.duration.to_seconds()
-                
-                # Build Input Args
-                if is_image(path):
-                    # Loop image for the specific duration
+
+                if self._is_image(path):
                     cmd.extend(['-loop', '1', '-t', str(duration), '-i', path])
                 else:
-                    # Seek video
-                    # -ss before -i is faster. -t defines duration of the clip.
                     cmd.extend(['-ss', str(start_time), '-t', str(duration), '-i', path])
-                
-                # Build Filter Chain for this input
-                # scale=1280:720:force_original_aspect_ratio=decrease checks bounds
-                # pad=1280:720:(ow-iw)/2:(oh-ih)/2 centers it
-                # setsar=1 ensures pixel aspect ratio is square
-                scale_filter = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1"
+
+                scale_filter = f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
                 filter_parts.append(f"[{input_count}:v]{scale_filter}[v{input_count}];")
-                
                 input_count += 1
 
         if input_count == 0:
             print("No clips found in timeline to render.")
             return
 
-        # Concat inputs
         concat_inputs = "".join([f"[v{i}]" for i in range(input_count)])
-        # n=input_count, v=1 (video out), a=0 (no audio out)
         filter_parts.append(f"{concat_inputs}concat=n={input_count}:v=1:a=0[outv]")
-        
+
         full_filter = "".join(filter_parts)
         cmd.extend(['-filter_complex', full_filter])
         cmd.extend(['-map', '[outv]'])
-        
-        # Output settings
-        # libx264, yuv420p for compatibility
         cmd.extend(['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', output_path])
 
+        self._run_ffmpeg(cmd)
+
+    def _render_with_overlays(self, output_path: str, target_width: int, target_height: int, fps: float):
+        """
+        Render with overlay tracks using FFmpeg overlay filter.
+        Strategy:
+        1. Render base track as concatenated video
+        2. For each overlay track, composite overlay clips at their specified times
+        """
+        cmd = ['ffmpeg', '-y']
+        filter_parts = []
+        input_index = 0
+
+        # --- Step 1: Add inputs for main track ---
+        main_track_clips = []
+        for item in self.otio_timeline.track:
+            if isinstance(item, otio.schema.Clip):
+                path = item.media_reference.target_url
+
+                start_time = 0.0
+                duration = 5.0
+                if item.source_range:
+                    start_time = item.source_range.start_time.to_seconds()
+                    duration = item.source_range.duration.to_seconds()
+
+                if self._is_image(path):
+                    cmd.extend(['-loop', '1', '-t', str(duration), '-i', path])
+                else:
+                    cmd.extend(['-ss', str(start_time), '-t', str(duration), '-i', path])
+
+                main_track_clips.append(input_index)
+                input_index += 1
+
+        if not main_track_clips:
+            print("No clips in main track to render.")
+            return
+
+        # Scale and concatenate main track
+        for i, idx in enumerate(main_track_clips):
+            scale_filter = f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+            filter_parts.append(f"[{idx}:v]{scale_filter}[main{i}];")
+
+        concat_inputs = "".join([f"[main{i}]" for i in range(len(main_track_clips))])
+        filter_parts.append(f"{concat_inputs}concat=n={len(main_track_clips)}:v=1:a=0[base];")
+
+        # --- Step 2: Process overlay tracks ---
+        current_base = "base"
+        overlay_counter = 0
+
+        for track_name, overlay_track in self.otio_timeline._overlay_tracks.items():
+            overlay_clips = self._get_track_clips_with_timing(overlay_track)
+
+            for start_time, duration, path in overlay_clips:
+                # Add overlay input
+                if self._is_image(path):
+                    cmd.extend(['-loop', '1', '-t', str(duration), '-i', path])
+                else:
+                    cmd.extend(['-t', str(duration), '-i', path])
+
+                overlay_input = input_index
+                input_index += 1
+
+                # Scale overlay to match target resolution (important for PNGs with transparency)
+                overlay_scaled = f"ovl_scaled{overlay_counter}"
+                filter_parts.append(f"[{overlay_input}:v]scale={target_width}:{target_height},format=rgba[{overlay_scaled}];")
+
+                # Apply overlay at specific time using enable filter
+                new_base = f"comp{overlay_counter}"
+                enable_expr = f"between(t,{start_time},{start_time + duration})"
+                filter_parts.append(f"[{current_base}][{overlay_scaled}]overlay=0:0:enable='{enable_expr}'[{new_base}];")
+
+                current_base = new_base
+                overlay_counter += 1
+
+        # Remove trailing semicolon and rename final output
+        if filter_parts:
+            # Fix the last filter to output to [outv]
+            last_filter = filter_parts[-1]
+            if last_filter.endswith(';'):
+                last_filter = last_filter[:-1]
+            # Replace the last output label with [outv]
+            last_bracket = last_filter.rfind('[')
+            if last_bracket != -1:
+                last_filter = last_filter[:last_bracket] + '[outv]'
+            filter_parts[-1] = last_filter
+
+        full_filter = "".join(filter_parts)
+        cmd.extend(['-filter_complex', full_filter])
+        cmd.extend(['-map', '[outv]'])
+        cmd.extend(['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', output_path])
+
+        self._run_ffmpeg(cmd)
+
+    def _run_ffmpeg(self, cmd: List[str]):
+        """Execute FFmpeg command and handle errors."""
         print(f"Executing FFmpeg render...")
-        # We don't print the full cmd as it might be huge, but for debug:
+        # Uncomment for debugging:
         # print(f"DEBUG CMD: {' '.join(cmd)}")
-        
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                raise RuntimeError(f"FFmpeg render failed:\nStout: {result.stdout}\nStderr: {result.stderr}")
-            print(f"Render complete: {output_path}")
+                raise RuntimeError(f"FFmpeg render failed:\nStdout: {result.stdout}\nStderr: {result.stderr}")
+            print(f"Render complete: {cmd[-1]}")
         except FileNotFoundError:
-             raise RuntimeError("FFmpeg executable not found. Please ensure ffmpeg is installed and in your PATH.")
+            raise RuntimeError("FFmpeg executable not found. Please ensure ffmpeg is installed and in your PATH.")
