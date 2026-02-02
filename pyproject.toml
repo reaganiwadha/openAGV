@@ -9,3 +9,11 @@ dependencies = [
     "opentimelineio>=0.18.1",
     "semantic-kernel>=1.36.0",
 ]
+
+[tool.pdoc]
+output_directory = "docs"
+
+[dependency-groups]
+dev = [
+    "pdoc>=16.0.0",
+]
