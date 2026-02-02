@@ -7,6 +7,7 @@ dependencies = [
     "ipykernel>=7.1.0",
     "openai>=2.15.0",
     "opentimelineio>=0.18.1",
+    "pillow>=12.1.0",
     "semantic-kernel>=1.36.0",
 ]
 
