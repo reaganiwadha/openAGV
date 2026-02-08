@@ -1,7 +1,11 @@
 import httpx
 import os
-from typing import Optional, Any
+from typing import Optional, TYPE_CHECKING
 from ..core import Analyzer, AssetType, Analysis, agent_action
+
+if TYPE_CHECKING:
+    from ..storage import StorageBackend
+
 
 class DeepgramAnalyzer(Analyzer):
     def __init__(self, api_key: str):
@@ -11,6 +15,10 @@ class DeepgramAnalyzer(Analyzer):
             supported_types=[AssetType.AUDIO, AssetType.VIDEO]
         )
         self.api_key = api_key
+        self.storage: "StorageBackend | None" = None
+
+    def set_storage(self, storage: "StorageBackend"):
+        self.storage = storage
 
     @agent_action(description="Transcribes an audio/video asset to text")
     async def analyze_asset(self, asset_id: str) -> bool:
@@ -22,10 +30,15 @@ class DeepgramAnalyzer(Analyzer):
         if not asset:
             print(f"[DeepgramAnalyzer] Error: Asset with ID {asset_id} not found.")
             return False
-        
+
+        # Resolve storage backend
+        storage = self.storage or (self.asset_bin.storage if self.asset_bin else None)
+        if not storage:
+            print(f"[DeepgramAnalyzer] Error: No StorageBackend available.")
+            return False
+
         try:
-            # Get audio path (converting video if necessary)
-            audio_path = await asset.get_audio_format()
+            audio_path = await asset.get_audio_format(storage)
         except Exception as e:
             print(f"[DeepgramAnalyzer] Error preparing audio: {e}")
             return False
@@ -46,7 +59,7 @@ class DeepgramAnalyzer(Analyzer):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, headers=headers, content=content, timeout=60.0)
-            
+
             if response.status_code != 200:
                 print(f"[DeepgramAnalyzer] Error from Deepgram: {response.status_code} - {response.text}")
                 return False
@@ -58,11 +71,7 @@ class DeepgramAnalyzer(Analyzer):
                 print("[DeepgramAnalyzer] No transcription available (silence or error).")
                 return False
 
-            # Append Analysis to the Asset
-            # We use the original asset path for the record, or we could use the audio path?
-            # Typically we want to associate it with the source asset.
-            original_path = asset.file_path
-            analysis = Analysis(original_path, transcript, self.name)
+            analysis = Analysis(asset.storage_key, transcript, self.name)
             asset.append_analysis(analysis)
 
             return True

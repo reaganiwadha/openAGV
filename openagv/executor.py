@@ -67,6 +67,8 @@ class SKLoopExecutor(Stepper):
             self.kernel.add_plugin(module, plugin_name=name)
             if hasattr(module, "set_asset_bin"):
                 module.set_asset_bin(self.asset_bin)
+            if hasattr(module, "set_storage") and self.asset_bin.storage:
+                module.set_storage(self.asset_bin.storage)
             if isinstance(module, Analyzer):
                 self.asset_bin.register_analyzer(module)
 

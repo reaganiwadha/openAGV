@@ -1,7 +1,11 @@
 import base64
 import os
+from typing import TYPE_CHECKING
 from openai import OpenAI
 from ..core import Analyzer, agent_action, AssetType
+
+if TYPE_CHECKING:
+    from ..storage import StorageBackend
 
 
 class ORVisionAnalyzer(Analyzer):
@@ -13,6 +17,10 @@ class ORVisionAnalyzer(Analyzer):
         )
         self.client = client
         self.model = model
+        self.storage: "StorageBackend | None" = None
+
+    def set_storage(self, storage: "StorageBackend"):
+        self.storage = storage
 
     def _encode_image(self, image_path):
         with open(image_path, "rb") as image_file:
@@ -29,21 +37,24 @@ class ORVisionAnalyzer(Analyzer):
             print(f"[ERROR] Asset with ID {asset_id} not found.")
             return False
 
-        # We need to access get_localized_path which is async now.
+        # Resolve to local path via storage backend
+        storage = self.storage or (self.asset_bin.storage if self.asset_bin else None)
+        if not storage:
+            print(f"[ERROR] No StorageBackend available for {self.name}")
+            return False
+
         try:
-            asset_path = await asset.get_localized_path()
+            asset_path = asset.local_path(storage)
         except Exception as e:
-            print(f"[ERROR] Could not localize asset: {e}")
+            print(f"[ERROR] Could not resolve asset path: {e}")
             return False
 
         print(f"[DEBUG] ORVisionAnalyzer analyzing {asset_path} with {self.model}...")
 
-        # Check if file exists
         if not os.path.exists(asset_path):
             print(f"Error: Asset not found at {asset_path}")
             return False
 
-        # Determine media type (simplified)
         ext = os.path.splitext(asset_path)[1].lower()
         content = ""
 
@@ -66,12 +77,10 @@ class ORVisionAnalyzer(Analyzer):
                 }
             ]
         elif ext in [".mp4", ".mov", ".avi", ".webm"]:
-            # Placeholder for video logic
             content = f"Video analysis for {asset_path} is not yet fully implemented (requires frame extraction)."
-            # Create analysis immediately for fallback
             from ..core import Analysis
 
-            asset.append_analysis(Analysis(asset_path, content, self.name))
+            asset.append_analysis(Analysis(asset.storage_key, content, self.name))
             return True
 
         else:
@@ -89,10 +98,9 @@ class ORVisionAnalyzer(Analyzer):
                 )
                 return False
 
-            # Create and append Analysis
             from ..core import Analysis
 
-            asset.append_analysis(Analysis(asset_path, content, self.name))
+            asset.append_analysis(Analysis(asset.storage_key, content, self.name))
             return True
 
         except Exception as e:

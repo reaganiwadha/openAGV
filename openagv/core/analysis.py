@@ -1,18 +1,19 @@
 from typing import Any
 
+
 class Analysis:
     """The result of an analysis."""
-    def __init__(self, asset_path: str, content: Any, analyzer_name: str):
-        self.asset_path = asset_path
+    def __init__(self, storage_key: str, content: Any, analyzer_name: str):
+        self.storage_key = storage_key
         self.content = content
         self.analyzer_name = analyzer_name
-    
+
     def __repr__(self):
-        return f"<Analysis of {self.asset_path} by {self.analyzer_name}: {self.content}>"
+        return f"<Analysis of {self.storage_key} by {self.analyzer_name}: {self.content}>"
 
     def to_dict(self) -> dict:
         return {
-            "asset_path": self.asset_path,
+            "storage_key": self.storage_key,
             "analyzer_name": self.analyzer_name,
             "content": self.content
         }
@@ -20,7 +21,7 @@ class Analysis:
     @classmethod
     def from_dict(cls, data: dict) -> 'Analysis':
         return cls(
-            asset_path=data["asset_path"],
+            storage_key=data["storage_key"],
             content=data["content"],
             analyzer_name=data["analyzer_name"]
         )

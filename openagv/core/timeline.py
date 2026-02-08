@@ -1,18 +1,38 @@
 import opentimelineio as otio
 import os
-from typing import Optional, Dict
+from typing import Optional, Dict, TYPE_CHECKING
 
 from .base import Agentable, agent_action
 from .bin import AssetBin
+
+if TYPE_CHECKING:
+    from ..storage import StorageBackend
+
 
 class Timeline(Agentable):
     """Abstract base class for a timeline."""
     def __init__(self, description: str):
         super().__init__(description)
         self.asset_bin: Optional[AssetBin] = None
+        self.storage: Optional["StorageBackend"] = None
 
     def set_asset_bin(self, asset_bin: AssetBin):
         self.asset_bin = asset_bin
+
+    def set_storage(self, storage: "StorageBackend"):
+        self.storage = storage
+
+    def _resolve_path(self, storage_key: str) -> str:
+        """Resolve a storage key to a real local path for OTIO/FFmpeg.
+
+        Falls back to the key itself if no storage backend is available
+        (e.g. when loaded from an .otio file with absolute paths).
+        """
+        if self.storage:
+            return self.storage.load_to_temp(storage_key)
+        if self.asset_bin and self.asset_bin.storage:
+            return self.asset_bin.storage.load_to_temp(storage_key)
+        return storage_key
 
     @agent_action(description="Add a clip to the timeline using an asset ID.")
     def add_clip_by_id(self, asset_id: str, duration_seconds: float = 5.0) -> str:
@@ -23,6 +43,7 @@ class Timeline(Agentable):
     def get_summary(self) -> str:
         """Returns a summary of the timeline. Abstract method."""
         raise NotImplementedError
+
 
 class OTIOTimeline(Timeline):
     """
@@ -57,12 +78,13 @@ class OTIOTimeline(Timeline):
         if not asset:
             return f"Error: Asset with ID {asset_id} not found."
 
-        # Create a reference to the media
-        media_reference = otio.schema.ExternalReference(target_url=asset.file_path)
+        # Resolve storage key to real local path for OTIO/FFmpeg
+        local_path = self._resolve_path(asset.storage_key)
+        media_reference = otio.schema.ExternalReference(target_url=local_path)
 
         duration_frames = int(duration_seconds * self.fps)
         clip = otio.schema.Clip(
-            name=os.path.basename(asset.file_path),
+            name=os.path.basename(asset.storage_key),
             media_reference=media_reference,
             source_range=otio.opentime.TimeRange(
                 start_time=otio.opentime.RationalTime(0, self.fps),
@@ -70,7 +92,7 @@ class OTIOTimeline(Timeline):
             )
         )
         self.track.append(clip)
-        return f"Added clip '{asset.file_path}' ({duration_seconds}s) to timeline."
+        return f"Added clip '{asset.storage_key}' ({duration_seconds}s) to timeline."
 
     def _get_or_create_overlay_track(self, track_name: str) -> otio.schema.Track:
         """Get an existing overlay track or create a new one."""
@@ -109,13 +131,14 @@ class OTIOTimeline(Timeline):
 
         overlay_track = self._get_or_create_overlay_track(track_name)
 
-        media_reference = otio.schema.ExternalReference(target_url=asset.file_path)
+        local_path = self._resolve_path(asset.storage_key)
+        media_reference = otio.schema.ExternalReference(target_url=local_path)
 
         duration_frames = int(duration_seconds * self.fps)
         start_frames = int(start_time_seconds * self.fps)
 
         clip = otio.schema.Clip(
-            name=os.path.basename(asset.file_path),
+            name=os.path.basename(asset.storage_key),
             media_reference=media_reference,
             source_range=otio.opentime.TimeRange(
                 start_time=otio.opentime.RationalTime(0, self.fps),
@@ -139,7 +162,7 @@ class OTIOTimeline(Timeline):
             overlay_track.append(gap)
 
         overlay_track.append(clip)
-        return f"Added overlay '{asset.file_path}' ({duration_seconds}s) at {start_time_seconds}s on track '{track_name}'."
+        return f"Added overlay '{asset.storage_key}' ({duration_seconds}s) at {start_time_seconds}s on track '{track_name}'."
 
     def add_overlay_by_path(
         self,
