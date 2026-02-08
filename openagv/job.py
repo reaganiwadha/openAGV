@@ -22,6 +22,19 @@ class JobStatus(Enum):
     CANCELLED = auto()
 
 
+class EventType(str, Enum):
+    STATE_CHANGE = "state_change"
+    STEP_STARTED = "step_started"
+    STEP_COMPLETED = "step_completed"
+    TOOL_CALL = "tool_call"
+    TOKEN = "token"
+    AGENT_MESSAGE = "agent_message"
+    LOG = "log"
+    COMPLETED = "completed"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class ChatMessage:
     """A single message in the job's conversation log with author attribution.
@@ -116,7 +129,15 @@ class Job:
     an async event stream via broadcast pattern (multiple listeners).
     """
 
-    def __init__(self, instruction: str, author: str):
+    def __init__(
+        self,
+        instruction: str,
+        author: str,
+        *,
+        job_type: str = "edit",
+        asset_id: str | None = None,
+        blocked_by: list[str] | None = None,
+    ):
         self.id: str = str(uuid.uuid4())
         self.status: JobStatus = JobStatus.PENDING
         self.created_at: datetime = datetime.now(timezone.utc)
@@ -127,12 +148,24 @@ class Job:
         self.error: str | None = None
         self.chat_history: list[ChatMessage] = []
 
+        # Queue fields
+        self.job_type: str = job_type
+        self.asset_id: str | None = asset_id
+        self.blocked_by: list[str] = blocked_by or []
+
         # Runtime-only, not serialized
         self._task: asyncio.Task | None = None
         self._subscribers: list[asyncio.Queue[Event]] = []
         self._done_event: asyncio.Event = asyncio.Event()
 
-    def _emit(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+    def is_ready(self, completed_job_ids: set[str]) -> bool:
+        """Return True if this job is PENDING and all dependencies are met."""
+        return (
+            self.status == JobStatus.PENDING
+            and all(bid in completed_job_ids for bid in self.blocked_by)
+        )
+
+    def _emit(self, event_type: EventType | str, data: dict[str, Any] | None = None) -> None:
         """Push an event to all subscriber queues."""
         event = Event(
             type=event_type,
@@ -173,7 +206,7 @@ class Job:
             while True:
                 event = await queue.get()
                 yield event
-                if event.type in ("completed", "error", "cancelled"):
+                if event.type in (EventType.COMPLETED, EventType.ERROR, EventType.CANCELLED):
                     break
         finally:
             self._subscribers.remove(queue)
@@ -190,21 +223,21 @@ class Job:
         self.finished_at = datetime.now(timezone.utc)
         if self._task and not self._task.done():
             self._task.cancel()
-        self._emit("cancelled")
+        self._emit(EventType.CANCELLED)
         self._done_event.set()
 
     def _mark_completed(self, result: JobResult) -> None:
         self.status = JobStatus.COMPLETED
         self.finished_at = datetime.now(timezone.utc)
         self.result = result
-        self._emit("completed", {"result": result.to_dict()})
+        self._emit(EventType.COMPLETED, {"result": result.to_dict()})
         self._done_event.set()
 
     def _mark_failed(self, error: str) -> None:
         self.status = JobStatus.FAILED
         self.finished_at = datetime.now(timezone.utc)
         self.error = error
-        self._emit("error", {"message": error})
+        self._emit(EventType.ERROR, {"message": error})
         self._done_event.set()
 
     def _mark_running(self) -> None:
@@ -218,6 +251,9 @@ class Job:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "author": self.author,
             "instruction": self.instruction,
+            "job_type": self.job_type,
+            "asset_id": self.asset_id,
+            "blocked_by": self.blocked_by,
             "result": self.result.to_dict() if self.result else None,
             "error": self.error,
             "chat_history": [m.to_dict() for m in self.chat_history],
@@ -225,7 +261,13 @@ class Job:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Job":
-        job = cls(instruction=data["instruction"], author=data["author"])
+        job = cls(
+            instruction=data["instruction"],
+            author=data["author"],
+            job_type=data.get("job_type", "edit"),
+            asset_id=data.get("asset_id"),
+            blocked_by=data.get("blocked_by"),
+        )
         job.id = data["id"]
         job.status = JobStatus[data["status"]]
         job.created_at = datetime.fromisoformat(data["created_at"])

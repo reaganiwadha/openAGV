@@ -35,17 +35,17 @@ You are an expert Autonomous Video Editor AI. Your goal is to understand the use
 """
 
 class SKLoopExecutor(Stepper):
-    def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, chat_completion: OpenAIChatCompletion, uses: List[Agentable] = [], debug: bool = False, bug_user: bool = False):
+    def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, chat_completion: OpenAIChatCompletion, uses: List[Agentable] = [], debug: bool = False, bug_user: bool = False, system_prompt: str | None = None):
         super().__init__(debug=debug)
         self.asset_bin = asset_bin
         self.user_instruction = instruction
         self.bug_user = bug_user
 
-        system_prompt = VIDEO_EDITOR_SYSTEM_PROMPT
+        prompt_text = system_prompt or VIDEO_EDITOR_SYSTEM_PROMPT
         if self.bug_user:
-            system_prompt += "\n\n**NOTE:** You ARE allowed to ask the user for clarification if absolutely necessary."
+            prompt_text += "\n\n**NOTE:** You ARE allowed to ask the user for clarification if absolutely necessary."
 
-        self.system_instruction = SystemInstruction(system_prompt)
+        self.system_instruction = SystemInstruction(prompt_text)
         self.uses = uses
         self.kernel = Kernel()
 

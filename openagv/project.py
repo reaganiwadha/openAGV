@@ -7,6 +7,7 @@ kicking off agent jobs and duplicate() for iteration.
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -19,9 +20,12 @@ from .core import (
     UserInstruction,
     ChecklistManager,
 )
-from .job import Job, JobStatus, JobResult, ChatMessage
+from .analysis_config import AnalysisConfig, AnalyzerSpec
+from .job import Job, JobStatus, JobResult, ChatMessage, EventType
 from .llm import LLMConfig
 from .storage import StorageBackend, LocalStorageBackend
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectValidationError(Exception):
@@ -83,7 +87,15 @@ class Project:
 
         # Job history — all jobs included in serialization
         self.jobs: list[Job] = []
-        self._active_job: Job | None = None
+
+        # Configurable system prompt (None = use executor default)
+        self.system_prompt: str | None = None
+
+        # Persistent chat history across jobs
+        self.chat_history: list[ChatMessage] = []
+
+        # Analysis config (optional)
+        self.analysis_config: AnalysisConfig | None = None
 
     # ------------------------------------------------------------------
     # Module registration
@@ -112,6 +124,196 @@ class Project:
         return self.asset_bin.add_wildcard(pattern)
 
     # ------------------------------------------------------------------
+    # Analysis config
+    # ------------------------------------------------------------------
+
+    def set_analysis_config(self, config: AnalysisConfig) -> None:
+        self.analysis_config = config
+
+    # ------------------------------------------------------------------
+    # Job queue
+    # ------------------------------------------------------------------
+
+    def _completed_job_ids(self) -> set[str]:
+        return {j.id for j in self.jobs if j.status == JobStatus.COMPLETED}
+
+    def enqueue_analysis(self, asset_id: str) -> Job | None:
+        """Create an analysis job for the given asset (idempotent)."""
+        # Skip if a pending/running analysis job already exists for this asset
+        for j in self.jobs:
+            if (
+                j.job_type == "analysis"
+                and j.asset_id == asset_id
+                and j.status in (JobStatus.PENDING, JobStatus.RUNNING)
+            ):
+                return j
+
+        asset = self.asset_bin.get_asset_by_id(asset_id)
+        if not asset:
+            return None
+
+        job = Job(
+            instruction=f"Analyze asset {asset_id}",
+            author="system",
+            job_type="analysis",
+            asset_id=asset_id,
+        )
+        self.jobs.append(job)
+        self.updated_at = datetime.now(timezone.utc)
+        return job
+
+    def next_ready_jobs(self, limit: int | None = None) -> list[Job]:
+        """Return PENDING jobs whose blocked_by are all COMPLETED.
+
+        Respects max_concurrent for analysis jobs.
+        """
+        completed = self._completed_job_ids()
+        ready: list[Job] = []
+
+        # Count currently running analysis jobs
+        running_analysis = sum(
+            1 for j in self.jobs
+            if j.job_type == "analysis" and j.status == JobStatus.RUNNING
+        )
+        max_concurrent = (
+            self.analysis_config.max_concurrent
+            if self.analysis_config
+            else 3
+        )
+
+        for job in self.jobs:
+            if not job.is_ready(completed):
+                continue
+
+            if job.job_type == "analysis":
+                if running_analysis >= max_concurrent:
+                    continue
+                running_analysis += 1
+
+            ready.append(job)
+            if limit and len(ready) >= limit:
+                break
+
+        return ready
+
+    async def run_job(self, job: Job) -> None:
+        """Run a single job to completion."""
+        job._mark_running()
+        job._emit(EventType.STATE_CHANGE, {"from": "PENDING", "to": "RUNNING"})
+
+        try:
+            if job.job_type == "analysis":
+                await self._run_analysis_job(job)
+            else:
+                await self._run_edit_job(job)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            job._mark_failed(str(e))
+
+    async def _run_analysis_job(self, job: Job) -> None:
+        asset = self.asset_bin.get_asset_by_id(job.asset_id)
+        if not asset:
+            job._mark_failed(f"Asset {job.asset_id} not found")
+            return
+
+        specs = (
+            self.analysis_config.specs_for_type(asset.asset_type)
+            if self.analysis_config
+            else []
+        )
+
+        if not specs:
+            # No analyzers configured — auto-complete
+            job._mark_completed(JobResult(agent_response="No analyzers configured"))
+            return
+
+        for spec in specs:
+            # Find registered module by class name
+            analyzer = next(
+                (m for m in self._modules if m.__class__.__name__ == spec.name),
+                None,
+            )
+            if not analyzer:
+                logger.warning(
+                    "Analyzer %s not found in registered modules, skipping",
+                    spec.name,
+                )
+                continue
+
+            job._emit(EventType.STEP_STARTED, {"step_name": f"Running {spec.name}"})
+            try:
+                await analyzer.analyze_asset(asset)
+                job._emit(EventType.STEP_COMPLETED, {"step_name": f"Running {spec.name}"})
+            except Exception as e:
+                job._mark_failed(f"{spec.name} failed: {e}")
+                return
+
+        job._mark_completed(
+            JobResult(agent_response=f"Analysis complete for asset {job.asset_id}")
+        )
+
+    async def _run_edit_job(self, job: Job) -> None:
+        if not self.llm_config:
+            job._mark_failed(
+                "No LLMConfig set on project. "
+                "Pass llm_config= at construction or load time."
+            )
+            return
+
+        _, _, chat_completion = self.llm_config.create_clients()
+
+        from .executor import SKLoopExecutor
+
+        executor = SKLoopExecutor(
+            asset_bin=self.asset_bin,
+            instruction=UserInstruction(job.instruction),
+            chat_completion=chat_completion,
+            uses=[*self._modules, self.timeline],
+            system_prompt=self.system_prompt,
+        )
+
+        # Seed executor with prior project-level chat history
+        for msg in self.chat_history:
+            if msg.role == "user":
+                executor.chat_history.add_user_message(msg.content)
+            elif msg.role == "agent":
+                executor.chat_history.add_assistant_message(msg.content)
+
+        # Wire stepper events → job events
+        def _on_stepper_change(stepper):
+            if stepper.current_step:
+                step = stepper.current_step
+                if step.status == "IN_PROGRESS":
+                    job._emit(EventType.STEP_STARTED, {
+                        "step_name": step.name,
+                        "step_index": stepper.current_step_index,
+                    })
+                elif step.status == "COMPLETED":
+                    job._emit(EventType.STEP_COMPLETED, {
+                        "step_name": step.name,
+                        "step_index": stepper.current_step_index,
+                    })
+
+        executor.register_callback(_on_stepper_change)
+        executor.set_event_emitter(job._emit)
+
+        await executor.start()
+
+        agent_response = ""
+        if executor.chat_history and len(executor.chat_history) > 0:
+            last = executor.chat_history[-1]
+            agent_response = str(last.content) if last.content else ""
+
+        job._add_chat_message("agent", agent_response, "agent:video-editor")
+
+        # Accumulate into project-level persistent chat history
+        self.chat_history.append(ChatMessage(role="user", content=job.instruction, author=job.author))
+        self.chat_history.append(ChatMessage(role="agent", content=agent_response, author="agent:video-editor"))
+
+        job._mark_completed(JobResult(agent_response=agent_response))
+
+    # ------------------------------------------------------------------
     # Job submission
     # ------------------------------------------------------------------
 
@@ -119,121 +321,50 @@ class Project:
         self,
         instruction: str,
         author: str = "user",
-        *,
-        debug: bool = False,
-        bug_user: bool = False,
     ) -> Job:
-        """Submit an instruction for autonomous execution.
-
-        Returns a Job immediately. The job runs in the background via
-        asyncio.create_task. Only one job may run per project at a time.
-
-        Args:
-            instruction: The user's natural-language instruction.
-            author: Identifier for who submitted (e.g. "user:jane@co.com").
-            debug: Enable verbose logging on the executor.
-            bug_user: Allow the agent to ask clarifying questions.
-        """
-        if self._active_job and self._active_job.status == JobStatus.RUNNING:
-            raise RuntimeError(
-                "A job is already running on this project. "
-                "Wait for it to finish or cancel it first."
-            )
+        """Submit an edit instruction. Auto-depends on pending/running analysis jobs."""
         if not self.llm_config:
             raise RuntimeError(
                 "No LLMConfig set on project. "
                 "Pass llm_config= at construction or load time."
             )
 
-        job = Job(instruction=instruction, author=author)
+        # Block on all pending/running analysis jobs
+        analysis_deps = [
+            j.id for j in self.jobs
+            if j.job_type == "analysis"
+            and j.status in (JobStatus.PENDING, JobStatus.RUNNING)
+        ]
 
-        # Record system + user messages in the job's chat history
+        job = Job(
+            instruction=instruction,
+            author=author,
+            job_type="edit",
+            blocked_by=analysis_deps,
+        )
+
         job._add_chat_message("system", "Video editor system prompt", "system")
         job._add_chat_message("user", instruction, author)
 
-        # Build executor
-        _, _, chat_completion = self.llm_config.create_clients()
-
-        from .executor import SKLoopExecutor
-
-        executor = SKLoopExecutor(
-            asset_bin=self.asset_bin,
-            instruction=UserInstruction(instruction),
-            chat_completion=chat_completion,
-            uses=[*self._modules, self.timeline],
-            debug=debug,
-            bug_user=bug_user,
-        )
-
-        # Wire stepper events → job events
-        def _on_stepper_change(stepper):
-            if stepper.current_step:
-                step = stepper.current_step
-                if step.status == "IN_PROGRESS":
-                    job._emit("step_started", {
-                        "step_name": step.name,
-                        "step_index": stepper.current_step_index,
-                    })
-                elif step.status == "COMPLETED":
-                    job._emit("step_completed", {
-                        "step_name": step.name,
-                        "step_index": stepper.current_step_index,
-                    })
-
-        executor.register_callback(_on_stepper_change)
-
-        # Wire executor events (token, tool_call, etc.) into job
-        executor.set_event_emitter(job._emit)
-
-        # Launch background task
-        job._mark_running()
-        job._emit("state_change", {"from": "PENDING", "to": "RUNNING"})
-
-        async def _run():
-            try:
-                await executor.start()
-
-                # Extract result
-                agent_response = ""
-                if executor.chat_history and len(executor.chat_history) > 0:
-                    last = executor.chat_history[-1]
-                    agent_response = str(last.content) if last.content else ""
-
-                job._add_chat_message("agent", agent_response, "agent:video-editor")
-
-                result = JobResult(agent_response=agent_response)
-                job._mark_completed(result)
-            except asyncio.CancelledError:
-                pass  # cancellation handled by job.cancel()
-            except Exception as e:
-                job._add_chat_message(
-                    "agent", f"Error: {e}", "agent:video-editor",
-                    metadata={"error": True},
-                )
-                job._mark_failed(str(e))
-
-        job._task = asyncio.create_task(_run())
-        self._active_job = job
         self.jobs.append(job)
         self.updated_at = datetime.now(timezone.utc)
         return job
 
     async def nudge(self, instruction: str, author: str = "user") -> None:
-        """Nudge the active job with an additional instruction."""
-        if not self._active_job or self._active_job.status != JobStatus.RUNNING:
+        """Nudge the running edit job with an additional instruction."""
+        running = next(
+            (j for j in self.jobs
+             if j.job_type == "edit" and j.status == JobStatus.RUNNING),
+            None,
+        )
+        if not running:
             raise RuntimeError("No active job to nudge.")
 
-        self._active_job._add_chat_message("user", instruction, author)
-        self._active_job._emit("log", {
+        running._add_chat_message("user", instruction, author)
+        running._emit(EventType.LOG, {
             "message": f"Nudged by {author}: {instruction}",
             "level": "INFO",
         })
-
-        # The executor's nudge method needs the executor reference.
-        # Since the executor is running in _run(), we inject via the
-        # chat history on the executor directly.
-        # For now, this is a limitation — full nudge support requires
-        # storing the executor reference on the job.
 
     # ------------------------------------------------------------------
     # Duplication
@@ -323,6 +454,9 @@ class Project:
                 "tasks": self.checklist.tasks,
             },
             "modules": self._module_names,
+            "system_prompt": self.system_prompt,
+            "chat_history": [m.to_dict() for m in self.chat_history],
+            "analysis_config": self.analysis_config.to_dict() if self.analysis_config else None,
             "jobs": [j.to_dict() for j in self.jobs],
         }
 
@@ -411,6 +545,18 @@ class Project:
 
         # Module names (hint for server to re-register)
         project._module_names = data.get("modules", [])
+
+        # Analysis config
+        if data.get("analysis_config"):
+            project.analysis_config = AnalysisConfig.from_dict(data["analysis_config"])
+
+        # System prompt
+        project.system_prompt = data.get("system_prompt")
+
+        # Persistent chat history
+        project.chat_history = [
+            ChatMessage.from_dict(m) for m in data.get("chat_history", [])
+        ]
 
         # Jobs
         project.jobs = [Job.from_dict(j) for j in data.get("jobs", [])]

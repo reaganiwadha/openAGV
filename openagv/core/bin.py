@@ -1,6 +1,7 @@
 import hashlib
-import os
 import json
+import os
+import subprocess
 from typing import List, Optional, TYPE_CHECKING
 
 from .base import Agentable, agent_action
@@ -9,6 +10,65 @@ from .assets import Asset, ImageAsset, VideoAsset, AudioAsset
 
 if TYPE_CHECKING:
     from ..storage import StorageBackend
+
+
+def _extract_metadata(file_path: str, asset_type: AssetType) -> dict:
+    """Extract media metadata from a file. Returns empty dict on failure."""
+    try:
+        if asset_type == AssetType.IMAGE:
+            from PIL import Image
+            with Image.open(file_path) as img:
+                return {
+                    "width": img.width,
+                    "height": img.height,
+                    "format": img.format,
+                }
+
+        if asset_type in (AssetType.VIDEO, AssetType.AUDIO):
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_streams", "-show_format",
+                    file_path,
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return {}
+            probe = json.loads(result.stdout)
+
+            if asset_type == AssetType.VIDEO:
+                video_stream = next(
+                    (s for s in probe.get("streams", []) if s.get("codec_type") == "video"),
+                    None,
+                )
+                if not video_stream:
+                    return {}
+                fmt = probe.get("format", {})
+                return {
+                    "width": int(video_stream.get("width", 0)),
+                    "height": int(video_stream.get("height", 0)),
+                    "duration": float(fmt.get("duration", 0)),
+                    "codec": video_stream.get("codec_name", ""),
+                }
+
+            # AUDIO
+            audio_stream = next(
+                (s for s in probe.get("streams", []) if s.get("codec_type") == "audio"),
+                None,
+            )
+            if not audio_stream:
+                return {}
+            fmt = probe.get("format", {})
+            return {
+                "duration": float(fmt.get("duration", 0)),
+                "codec": audio_stream.get("codec_name", ""),
+                "sample_rate": int(audio_stream.get("sample_rate", 0)),
+            }
+    except Exception:
+        pass
+    return {}
 
 
 class AssetBin(Agentable):
@@ -86,6 +146,7 @@ class AssetBin(Agentable):
             asset = Asset(storage_key, asset_type)
 
         asset.id = file_hash
+        asset.metadata = _extract_metadata(file_path, asset_type)
         self.assets.append(asset)
         return asset
 
@@ -109,9 +170,18 @@ class AssetBin(Agentable):
     def get_asset_by_id(self, asset_id: str) -> Optional[Asset]:
         return next((a for a in self.assets if a.id == asset_id), None)
 
-    @agent_action(description="List all assets in the bin. Returns list of ID, storage key, and type.")
+    @agent_action(description="List all assets in the bin with analysis status. Shows how many analyzers have run vs. how many are still available.")
     def list_assets(self) -> str:
-        return "\n".join([f"ID: {a.id} | Key: {a.storage_key} ({a.asset_type.name})" for a in self.assets])
+        lines = []
+        for a in self.assets:
+            analyzed_by = len(a.analyses)
+            pending = sum(
+                1 for az in self.analyzers
+                if az.can_analyze(a) and not a.has_analysis_from(az.name)
+            )
+            status = "fully analyzed" if analyzed_by > 0 and pending == 0 else f"{analyzed_by} done, {pending} pending"
+            lines.append(f"ID: {a.id} | Key: {a.storage_key} ({a.asset_type.name}) | Analyses: {status}")
+        return "\n".join(lines)
 
     @agent_action(description="Get an asset storage key by fuzzy filename match")
     def get_asset_path(self, filename: str) -> str:
