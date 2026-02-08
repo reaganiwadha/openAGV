@@ -1,22 +1,32 @@
 import os
 import subprocess
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, TYPE_CHECKING
 import opentimelineio as otio
 from openagv.core.timeline import OTIOTimeline
+
+if TYPE_CHECKING:
+    from .storage import StorageBackend
 
 
 class FfmpegOTIORenderer:
     """
     Renders an OTIOTimeline to a video file using FFmpeg.
     Supports multiple tracks with overlay compositing.
-    This class is not Agentable.
+
+    Can optionally use a StorageBackend to store the rendered output.
+    The timeline's target_url values should already be resolved to
+    local paths (done by OTIOTimeline._resolve_path at clip-add time).
     """
-    def __init__(self):
+    def __init__(self, storage: Optional["StorageBackend"] = None):
         self.otio_timeline: Optional[OTIOTimeline] = None
+        self.storage: Optional["StorageBackend"] = storage
 
     def set_otio(self, otio_timeline: OTIOTimeline):
         """Sets the OTIO timeline to be rendered."""
         self.otio_timeline = otio_timeline
+
+    def set_storage(self, storage: "StorageBackend"):
+        self.storage = storage
 
     def validate(self) -> bool:
         """
@@ -69,7 +79,6 @@ class FfmpegOTIORenderer:
 
         for item in track:
             if isinstance(item, otio.schema.Gap):
-                # Gap just advances time
                 if item.source_range:
                     current_time += item.source_range.duration.to_seconds()
             elif isinstance(item, otio.schema.Clip):
@@ -83,33 +92,41 @@ class FfmpegOTIORenderer:
 
         return clips
 
-    def render(self, output_path: str = "otio.mp4"):
+    def render(self, output_path: str = "otio.mp4", *, store_key: str | None = None) -> str:
         """
         Renders the timeline to the specified output path using FFmpeg.
-        Handling:
-        - Resizes all inputs to target resolution (with padding) to ensure concat works.
-        - Handles images (loops them) and videos (seeks/trims).
-        - Supports overlay tracks - composites them on top of the base video.
-        - Renders video stream only (for now) to avoid issues with mixed silent/sound assets.
+
+        Args:
+            output_path: Local path for the rendered file.
+            store_key: If provided (and storage is set), store the rendered
+                       file under this key and return the key.
+
+        Returns:
+            The output path or storage key.
         """
         self.validate()
 
         if not self.otio_timeline or not self.otio_timeline.track or len(self.otio_timeline.track) == 0:
             print("Warning: Empty timeline, nothing to render.")
-            return
+            return output_path
 
-        # Use timeline dimensions or default
         target_width = getattr(self.otio_timeline, 'width', 1280) or 1280
         target_height = getattr(self.otio_timeline, 'height', 720) or 720
         fps = getattr(self.otio_timeline, 'fps', 30) or 30
 
-        # Check if we have overlays
         has_overlays = bool(self.otio_timeline._overlay_tracks)
 
         if has_overlays:
             self._render_with_overlays(output_path, target_width, target_height, fps)
         else:
             self._render_simple(output_path, target_width, target_height)
+
+        # Store rendered output via backend if requested
+        if self.storage and store_key:
+            self.storage.store(output_path, store_key)
+            return store_key
+
+        return output_path
 
     def _render_simple(self, output_path: str, target_width: int, target_height: int):
         """Render without overlays - simple concatenation."""
@@ -154,15 +171,11 @@ class FfmpegOTIORenderer:
     def _render_with_overlays(self, output_path: str, target_width: int, target_height: int, fps: float):
         """
         Render with overlay tracks using FFmpeg overlay filter.
-        Strategy:
-        1. Render base track as concatenated video
-        2. For each overlay track, composite overlay clips at their specified times
         """
         cmd = ['ffmpeg', '-y']
         filter_parts = []
         input_index = 0
 
-        # --- Step 1: Add inputs for main track ---
         main_track_clips = []
         for item in self.otio_timeline.track:
             if isinstance(item, otio.schema.Clip):
@@ -186,7 +199,6 @@ class FfmpegOTIORenderer:
             print("No clips in main track to render.")
             return
 
-        # Scale and concatenate main track
         for i, idx in enumerate(main_track_clips):
             scale_filter = f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
             filter_parts.append(f"[{idx}:v]{scale_filter}[main{i}];")
@@ -194,7 +206,6 @@ class FfmpegOTIORenderer:
         concat_inputs = "".join([f"[main{i}]" for i in range(len(main_track_clips))])
         filter_parts.append(f"{concat_inputs}concat=n={len(main_track_clips)}:v=1:a=0[base];")
 
-        # --- Step 2: Process overlay tracks ---
         current_base = "base"
         overlay_counter = 0
 
@@ -202,7 +213,6 @@ class FfmpegOTIORenderer:
             overlay_clips = self._get_track_clips_with_timing(overlay_track)
 
             for start_time, duration, path in overlay_clips:
-                # Add overlay input
                 if self._is_image(path):
                     cmd.extend(['-loop', '1', '-t', str(duration), '-i', path])
                 else:
@@ -211,11 +221,9 @@ class FfmpegOTIORenderer:
                 overlay_input = input_index
                 input_index += 1
 
-                # Scale overlay to match target resolution (important for PNGs with transparency)
                 overlay_scaled = f"ovl_scaled{overlay_counter}"
                 filter_parts.append(f"[{overlay_input}:v]scale={target_width}:{target_height},format=rgba[{overlay_scaled}];")
 
-                # Apply overlay at specific time using enable filter
                 new_base = f"comp{overlay_counter}"
                 enable_expr = f"between(t,{start_time},{start_time + duration})"
                 filter_parts.append(f"[{current_base}][{overlay_scaled}]overlay=0:0:enable='{enable_expr}'[{new_base}];")
@@ -223,13 +231,10 @@ class FfmpegOTIORenderer:
                 current_base = new_base
                 overlay_counter += 1
 
-        # Remove trailing semicolon and rename final output
         if filter_parts:
-            # Fix the last filter to output to [outv]
             last_filter = filter_parts[-1]
             if last_filter.endswith(';'):
                 last_filter = last_filter[:-1]
-            # Replace the last output label with [outv]
             last_bracket = last_filter.rfind('[')
             if last_bracket != -1:
                 last_filter = last_filter[:last_bracket] + '[outv]'
@@ -245,8 +250,6 @@ class FfmpegOTIORenderer:
     def _run_ffmpeg(self, cmd: List[str]):
         """Execute FFmpeg command and handle errors."""
         print(f"Executing FFmpeg render...")
-        # Uncomment for debugging:
-        # print(f"DEBUG CMD: {' '.join(cmd)}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
