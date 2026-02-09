@@ -1,8 +1,7 @@
 """Project wrapper for openAGV.
 
 Bundles AssetBin, OTIOTimeline, ChecklistManager, StorageBackend, and
-LLMConfig into a single serializable unit. Provides submit() for
-kicking off agent jobs and duplicate() for iteration.
+LLMConfig into a single serializable unit.
 """
 
 import asyncio
@@ -20,10 +19,10 @@ from .core import (
     UserInstruction,
     ChecklistManager,
 )
-from .analysis_config import AnalysisConfig, AnalyzerSpec
-from .job import Job, JobStatus, JobResult, ChatMessage, EventType
+from .job import ChatMessage
 from .llm import LLMConfig
 from .storage import StorageBackend, LocalStorageBackend
+from .executor import SKLoopExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -37,18 +36,8 @@ class Project:
     """A self-contained openAGV project.
 
     Owns all state needed for autonomous video editing: assets, timeline,
-    checklist, LLM config, and job history. Fully JSON-serializable
+    checklist, LLM config, and chat history. Fully JSON-serializable
     (minus secrets and runtime objects).
-
-    Usage:
-        project = Project(
-            name="Spring Campaign",
-            llm_config=LLMConfig(provider="openrouter", model="openai/gpt-4o-mini"),
-            storage=LocalStorageBackend("/data/projects", "my-project-id"),
-        )
-        project.add_assets("uploads/*.jpg")
-        job = project.submit("Create a 30s product showcase", author="user:jane")
-        await job.wait()
     """
 
     def __init__(
@@ -85,21 +74,14 @@ class Project:
         self._modules: list[Agentable] = []
         self._module_names: list[str] = []
 
-        # Job history — all jobs included in serialization
-        self.jobs: list[Job] = []
-
         # Configurable system prompt (None = use executor default)
         self.system_prompt: str | None = None
 
-        # Persistent chat history across jobs
+        # Persistent chat history
         self.chat_history: list[ChatMessage] = []
 
-        # Analysis config (optional)
-        self.analysis_config: AnalysisConfig | None = None
-
-    # ------------------------------------------------------------------
-    # Module registration
-    # ------------------------------------------------------------------
+        # Runtime executor instance
+        self._executor: SKLoopExecutor | None = None
 
     def register_module(self, module: Agentable) -> None:
         """Register an analyzer or generator module."""
@@ -114,261 +96,95 @@ class Project:
             module.set_storage(self.storage)
         if isinstance(module, Analyzer):
             self.asset_bin.register_analyzer(module)
-
-    # ------------------------------------------------------------------
-    # Asset helpers
-    # ------------------------------------------------------------------
+        
+        # Invalidate executor so it picks up the new module next run
+        self._executor = None
 
     def add_assets(self, pattern: str) -> list:
         """Add assets from a glob pattern. Convenience wrapper."""
         return self.asset_bin.add_wildcard(pattern)
 
-    # ------------------------------------------------------------------
-    # Analysis config
-    # ------------------------------------------------------------------
+    async def preanalyze_pendings(self, max_concurrent: int = 3) -> None:
+        """Analyze assets that haven't been analyzed yet by registered analyzers."""
+        tasks = []
+        semaphore = asyncio.Semaphore(max_concurrent)
 
-    def set_analysis_config(self, config: AnalysisConfig) -> None:
-        self.analysis_config = config
+        async def _analyze_safely(analyzer: Analyzer, asset_id: str):
+            async with semaphore:
+                try:
+                    logger.info(f"Running {analyzer.name} on {asset_id}")
+                    await analyzer.analyze_asset(asset_id)
+                except Exception as e:
+                    logger.error(f"Analysis failed for {asset_id} with {analyzer.name}: {e}")
 
-    # ------------------------------------------------------------------
-    # Job queue
-    # ------------------------------------------------------------------
+        for asset in self.asset_bin.assets:
+            for module in self._modules:
+                if isinstance(module, Analyzer) and module.can_analyze(asset):
+                    if not asset.has_analysis_from(module.name):
+                        tasks.append(_analyze_safely(module, asset.id))
 
-    def _completed_job_ids(self) -> set[str]:
-        return {j.id for j in self.jobs if j.status == JobStatus.COMPLETED}
+        if tasks:
+            logger.info(f"Starting {len(tasks)} analysis tasks...")
+            await asyncio.gather(*tasks)
+            self.updated_at = datetime.now(timezone.utc)
+            logger.info("Pre-analysis complete.")
+        else:
+            logger.info("No pending analyses found.")
 
-    def enqueue_analysis(self, asset_id: str) -> Job | None:
-        """Create an analysis job for the given asset (idempotent)."""
-        # Skip if a pending/running analysis job already exists for this asset
-        for j in self.jobs:
-            if (
-                j.job_type == "analysis"
-                and j.asset_id == asset_id
-                and j.status in (JobStatus.PENDING, JobStatus.RUNNING)
-            ):
-                return j
+    async def rag_loop(self, instruction: str) -> str:
+        """Execute a RAG loop for the given instruction.
 
-        asset = self.asset_bin.get_asset_by_id(asset_id)
-        if not asset:
-            return None
-
-        job = Job(
-            instruction=f"Analyze asset {asset_id}",
-            author="system",
-            job_type="analysis",
-            asset_id=asset_id,
-        )
-        self.jobs.append(job)
-        self.updated_at = datetime.now(timezone.utc)
-        return job
-
-    def next_ready_jobs(self, limit: int | None = None) -> list[Job]:
-        """Return PENDING jobs whose blocked_by are all COMPLETED.
-
-        Respects max_concurrent for analysis jobs.
+        Initializes or reuses the LLM executor, runs the cycle,
+        and returns the final agent response.
         """
-        completed = self._completed_job_ids()
-        ready: list[Job] = []
-
-        # Count currently running analysis jobs
-        running_analysis = sum(
-            1 for j in self.jobs
-            if j.job_type == "analysis" and j.status == JobStatus.RUNNING
-        )
-        max_concurrent = (
-            self.analysis_config.max_concurrent
-            if self.analysis_config
-            else 3
-        )
-
-        for job in self.jobs:
-            if not job.is_ready(completed):
-                continue
-
-            if job.job_type == "analysis":
-                if running_analysis >= max_concurrent:
-                    continue
-                running_analysis += 1
-
-            ready.append(job)
-            if limit and len(ready) >= limit:
-                break
-
-        return ready
-
-    async def run_job(self, job: Job) -> None:
-        """Run a single job to completion."""
-        job._mark_running()
-        job._emit(EventType.STATE_CHANGE, {"from": "PENDING", "to": "RUNNING"})
-
-        try:
-            if job.job_type == "analysis":
-                await self._run_analysis_job(job)
-            else:
-                await self._run_edit_job(job)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            job._mark_failed(str(e))
-
-    async def _run_analysis_job(self, job: Job) -> None:
-        asset = self.asset_bin.get_asset_by_id(job.asset_id)
-        if not asset:
-            job._mark_failed(f"Asset {job.asset_id} not found")
-            return
-
-        specs = (
-            self.analysis_config.specs_for_type(asset.asset_type)
-            if self.analysis_config
-            else []
-        )
-
-        if not specs:
-            # No analyzers configured — auto-complete
-            job._mark_completed(JobResult(agent_response="No analyzers configured"))
-            return
-
-        for spec in specs:
-            # Find registered module by class name
-            analyzer = next(
-                (m for m in self._modules if m.__class__.__name__ == spec.name),
-                None,
-            )
-            if not analyzer:
-                logger.warning(
-                    "Analyzer %s not found in registered modules, skipping",
-                    spec.name,
-                )
-                continue
-
-            job._emit(EventType.STEP_STARTED, {"step_name": f"Running {spec.name}"})
-            try:
-                await analyzer.analyze_asset(asset)
-                job._emit(EventType.STEP_COMPLETED, {"step_name": f"Running {spec.name}"})
-            except Exception as e:
-                job._mark_failed(f"{spec.name} failed: {e}")
-                return
-
-        job._mark_completed(
-            JobResult(agent_response=f"Analysis complete for asset {job.asset_id}")
-        )
-
-    async def _run_edit_job(self, job: Job) -> None:
-        if not self.llm_config:
-            job._mark_failed(
-                "No LLMConfig set on project. "
-                "Pass llm_config= at construction or load time."
-            )
-            return
-
-        _, _, chat_completion = self.llm_config.create_clients()
-
-        from .executor import SKLoopExecutor
-
-        executor = SKLoopExecutor(
-            asset_bin=self.asset_bin,
-            instruction=UserInstruction(job.instruction),
-            chat_completion=chat_completion,
-            uses=[*self._modules, self.timeline],
-            system_prompt=self.system_prompt,
-        )
-
-        # Seed executor with prior project-level chat history
-        for msg in self.chat_history:
-            if msg.role == "user":
-                executor.chat_history.add_user_message(msg.content)
-            elif msg.role == "agent":
-                executor.chat_history.add_assistant_message(msg.content)
-
-        # Wire stepper events → job events
-        def _on_stepper_change(stepper):
-            if stepper.current_step:
-                step = stepper.current_step
-                if step.status == "IN_PROGRESS":
-                    job._emit(EventType.STEP_STARTED, {
-                        "step_name": step.name,
-                        "step_index": stepper.current_step_index,
-                    })
-                elif step.status == "COMPLETED":
-                    job._emit(EventType.STEP_COMPLETED, {
-                        "step_name": step.name,
-                        "step_index": stepper.current_step_index,
-                    })
-
-        executor.register_callback(_on_stepper_change)
-        executor.set_event_emitter(job._emit)
-
-        await executor.start()
-
-        agent_response = ""
-        if executor.chat_history and len(executor.chat_history) > 0:
-            last = executor.chat_history[-1]
-            agent_response = str(last.content) if last.content else ""
-
-        job._add_chat_message("agent", agent_response, "agent:video-editor")
-
-        # Accumulate into project-level persistent chat history
-        self.chat_history.append(ChatMessage(role="user", content=job.instruction, author=job.author))
-        self.chat_history.append(ChatMessage(role="agent", content=agent_response, author="agent:video-editor"))
-
-        job._mark_completed(JobResult(agent_response=agent_response))
-
-    # ------------------------------------------------------------------
-    # Job submission
-    # ------------------------------------------------------------------
-
-    def submit(
-        self,
-        instruction: str,
-        author: str = "user",
-    ) -> Job:
-        """Submit an edit instruction. Auto-depends on pending/running analysis jobs."""
         if not self.llm_config:
             raise RuntimeError(
                 "No LLMConfig set on project. "
                 "Pass llm_config= at construction or load time."
             )
 
-        # Block on all pending/running analysis jobs
-        analysis_deps = [
-            j.id for j in self.jobs
-            if j.job_type == "analysis"
-            and j.status in (JobStatus.PENDING, JobStatus.RUNNING)
-        ]
+        # Initialize executor if needed
+        if not self._executor:
+            try:
+                _, _, chat_completion = self.llm_config.create_clients()
+            except Exception as e:
+                raise RuntimeError(f"Failed to initialize LLM clients: {e}") from e
 
-        job = Job(
-            instruction=instruction,
-            author=author,
-            job_type="edit",
-            blocked_by=analysis_deps,
-        )
+            self._executor = SKLoopExecutor(
+                asset_bin=self.asset_bin,
+                chat_completion=chat_completion,
+                uses=[*self._modules, self.timeline],
+                checklist_manager=self.checklist,
+                system_prompt=self.system_prompt,
+            )
 
-        job._add_chat_message("system", "Video editor system prompt", "system")
-        job._add_chat_message("user", instruction, author)
+            # Seed executor with prior project-level chat history
+            # Note: SKLoopExecutor init adds system prompt, so we skip index 0 if it's system?
+            # Actually SK ChatHistory from project history:
+            for msg in self.chat_history:
+                if msg.role == "user":
+                    self._executor.chat_history.add_user_message(msg.content)
+                elif msg.role == "agent":
+                    self._executor.chat_history.add_assistant_message(msg.content)
 
-        self.jobs.append(job)
+        # Run the loop via nudge
+        await self._executor.nudge(UserInstruction(instruction))
+
+        # Capture the new response (last message)
+        # nudge() added user msg, then agent replied. So last 2 messages are relevant?
+        # We need to return the agent response text.
+        agent_response = ""
+        if len(self._executor.chat_history) > 0:
+            last = self._executor.chat_history[-1]
+            agent_response = str(last.content) if last.content else ""
+
+        # Update project history (append ONLY the new interaction)
+        # We append what we just did: the instruction and the response.
+        self.chat_history.append(ChatMessage(role="user", content=instruction, author="user"))
+        self.chat_history.append(ChatMessage(role="agent", content=agent_response, author="agent:video-editor"))
+
         self.updated_at = datetime.now(timezone.utc)
-        return job
-
-    async def nudge(self, instruction: str, author: str = "user") -> None:
-        """Nudge the running edit job with an additional instruction."""
-        running = next(
-            (j for j in self.jobs
-             if j.job_type == "edit" and j.status == JobStatus.RUNNING),
-            None,
-        )
-        if not running:
-            raise RuntimeError("No active job to nudge.")
-
-        running._add_chat_message("user", instruction, author)
-        running._emit(EventType.LOG, {
-            "message": f"Nudged by {author}: {instruction}",
-            "level": "INFO",
-        })
-
-    # ------------------------------------------------------------------
-    # Duplication
-    # ------------------------------------------------------------------
+        return agent_response
 
     def duplicate(
         self,
@@ -416,21 +232,13 @@ class Project:
             self.asset_bin.to_dict(), storage=new_storage
         )
 
-        # Re-register same module types (caller should re-register
-        # module instances since they hold runtime state like API clients)
+        # Re-register same module types
         new_project._module_names = list(self._module_names)
 
         return new_project
 
-    # ------------------------------------------------------------------
-    # Serialization
-    # ------------------------------------------------------------------
-
     def to_dict(self) -> dict[str, Any]:
-        """Serialize project to a dict. Suitable for JSON/JSONB storage.
-
-        Excludes: api_key, storage backend, runtime executor state.
-        """
+        """Serialize project to a dict. Suitable for JSON/JSONB storage."""
         self.updated_at = datetime.now(timezone.utc)
         return {
             "id": self.id,
@@ -445,7 +253,6 @@ class Project:
                 "height": self.timeline.height,
                 "fps": self.timeline.fps,
                 "name": self.timeline.timeline.name,
-                # Embed OTIO as JSON dict
                 "_otio": json.loads(
                     self.timeline.timeline.to_json_string()
                 ),
@@ -456,8 +263,6 @@ class Project:
             "modules": self._module_names,
             "system_prompt": self.system_prompt,
             "chat_history": [m.to_dict() for m in self.chat_history],
-            "analysis_config": self.analysis_config.to_dict() if self.analysis_config else None,
-            "jobs": [j.to_dict() for j in self.jobs],
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -472,27 +277,15 @@ class Project:
         api_key: str | None = None,
         storage: StorageBackend | None = None,
     ) -> "Project":
-        """Deserialize a project from a dict.
-
-        Args:
-            data: The project dict (e.g. from JSONB column).
-            api_key: Runtime secret re-injected by the server.
-            storage: StorageBackend instance (infra config, not project state).
-
-        Raises:
-            ProjectValidationError: If required fields are missing or invalid.
-        """
-        # Validate required fields
+        """Deserialize a project from a dict."""
         for field in ("id", "asset_bin"):
             if field not in data:
                 raise ProjectValidationError(f"Missing required field: {field}")
 
-        # LLM config
         llm_config = None
         if data.get("llm_config"):
             llm_config = LLMConfig.from_dict(data["llm_config"], api_key=api_key)
 
-        # Timeline dimensions
         tl_data = data.get("timeline", {})
         width = tl_data.get("width", 1920)
         height = tl_data.get("height", 1080)
@@ -512,18 +305,15 @@ class Project:
         project.created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else project.created_at
         project.updated_at = datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else project.updated_at
 
-        # Asset bin
         project.asset_bin = AssetBin.from_dict(data["asset_bin"], storage=storage)
         project.timeline.set_asset_bin(project.asset_bin)
 
-        # Timeline — restore from embedded OTIO
         import opentimelineio as otio
         if "_otio" in tl_data:
             otio_timeline = otio.adapters.read_from_string(
                 json.dumps(tl_data["_otio"]), "otio_json"
             )
             project.timeline.timeline = otio_timeline
-            # Restore tracks
             video_tracks = [
                 t for t in otio_timeline.tracks
                 if t.kind == otio.schema.TrackKind.Video
@@ -534,32 +324,20 @@ class Project:
                     name = track.name or f"Overlay{len(project.timeline._overlay_tracks) + 1}"
                     project.timeline._overlay_tracks[name] = track
 
-        # Wire storage into timeline
         if storage:
             project.timeline.set_storage(storage)
 
-        # Checklist
         checklist_data = data.get("checklist", {})
         if "tasks" in checklist_data:
             project.checklist.tasks = checklist_data["tasks"]
 
-        # Module names (hint for server to re-register)
         project._module_names = data.get("modules", [])
 
-        # Analysis config
-        if data.get("analysis_config"):
-            project.analysis_config = AnalysisConfig.from_dict(data["analysis_config"])
-
-        # System prompt
         project.system_prompt = data.get("system_prompt")
 
-        # Persistent chat history
         project.chat_history = [
             ChatMessage.from_dict(m) for m in data.get("chat_history", [])
         ]
-
-        # Jobs
-        project.jobs = [Job.from_dict(j) for j in data.get("jobs", [])]
 
         return project
 

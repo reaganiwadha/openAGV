@@ -1,4 +1,4 @@
-from typing import List, Callable, Any
+from typing import List, Callable, Any, Optional
 from semantic_kernel import Kernel
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
@@ -35,10 +35,18 @@ You are an expert Autonomous Video Editor AI. Your goal is to understand the use
 """
 
 class SKLoopExecutor(Stepper):
-    def __init__(self, asset_bin: AssetBin, instruction: UserInstruction, chat_completion: OpenAIChatCompletion, uses: List[Agentable] = [], debug: bool = False, bug_user: bool = False, system_prompt: str | None = None):
+    def __init__(
+        self,
+        asset_bin: AssetBin,
+        chat_completion: OpenAIChatCompletion,
+        uses: List[Agentable] = [],
+        checklist_manager: Optional[ChecklistManager] = None,
+        debug: bool = False,
+        bug_user: bool = False,
+        system_prompt: str | None = None
+    ):
         super().__init__(debug=debug)
         self.asset_bin = asset_bin
-        self.user_instruction = instruction
         self.bug_user = bug_user
 
         prompt_text = system_prompt or VIDEO_EDITOR_SYSTEM_PROMPT
@@ -58,7 +66,7 @@ class SKLoopExecutor(Stepper):
         self.kernel.add_plugin(self.asset_bin, plugin_name="AssetBin")
 
         # Add ChecklistManager as a plugin
-        self.checklist_manager = ChecklistManager()
+        self.checklist_manager = checklist_manager or ChecklistManager()
         self.kernel.add_plugin(self.checklist_manager, plugin_name="ChecklistManager")
 
         # Add other modules directly as plugins
@@ -72,10 +80,9 @@ class SKLoopExecutor(Stepper):
             if isinstance(module, Analyzer):
                 self.asset_bin.register_analyzer(module)
 
-        # Initialize ChatHistory
+        # Initialize ChatHistory (empty initially, caller should populate or use default)
         self.chat_history = ChatHistory()
         self.chat_history.add_system_message(self.system_instruction.prompt)
-        self.chat_history.add_user_message(self.user_instruction.prompt)
 
         # Event emitter callback — set by Job to receive events
         self._event_emitter: Callable[[str, dict[str, Any]], None] | None = None
@@ -158,8 +165,8 @@ class SKLoopExecutor(Stepper):
                     result_content = msg
 
             # Add the final assembled response to history
-            if result_content:
-                self.chat_history.add_message(result_content)
+            if full_content:
+                self.chat_history.add_assistant_message(full_content)
 
             self._emit_event("agent_message", {"content": full_content})
             self.log(f"Final Agent Response: {full_content}")
@@ -171,6 +178,7 @@ class SKLoopExecutor(Stepper):
             self._emit_event("error", {"message": str(e)})
             self.fail_current_step(str(e))
             self.set_state(StepperState.ERROR)
+            raise e
 
     async def nudge(self, instruction: UserInstruction):
         """Advances the action by adding a new user instruction."""

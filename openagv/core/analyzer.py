@@ -20,6 +20,6 @@ class Analyzer(Agentable):
     def can_analyze(self, asset: 'Asset') -> bool:
         return asset.asset_type in self.supported_types
 
-    @agent_action(description="Analyze an asset")
-    async def analyze_asset(self, asset: 'Asset') -> bool:
+    @agent_action(description="Analyze an asset by its ID")
+    async def analyze_asset(self, asset_id: str) -> bool:
         raise NotImplementedError

@@ -28,9 +28,9 @@ openagv/
     vision.py    # ORVisionAnalyzer (OpenAI-compatible vision API)
     audio.py     # DeepgramAnalyzer
     textcard.py  # TextCardGenerator (Pillow-based)
-  executor.py    # SKLoopExecutor — Semantic Kernel agentic loop with streaming
-  project.py     # Project — top-level wrapper, JSON serializable, job management
-  job.py         # Job, Event, ChatMessage — async broadcast to SSE subscribers
+  executor.py    # SKLoopExecutor — Semantic Kernel agentic loop
+  project.py     # Project — top-level wrapper, JSON serializable
+  job.py         # ChatMessage model
   llm.py         # LLMConfig + create_clients() factory
   storage.py     # StorageBackend protocol + LocalStorageBackend
   renderer.py    # FfmpegOTIORenderer
@@ -41,16 +41,14 @@ openagv/
 
 - **`@agent_action`** is an alias for Semantic Kernel's `@kernel_function`. Any method decorated with it becomes an LLM-callable tool.
 - **StorageBackend protocol**: All file access goes through `storage.store()` / `storage.load_to_temp()`. Assets use `storage_key` (e.g. `assets/<sha256>.jpg`), never raw file paths.
-- **Project is the main entry point**: `Project` owns AssetBin, OTIOTimeline, ChecklistManager, jobs. `project.submit()` launches an async executor. `project.to_dict()` / `Project.from_dict()` for JSON persistence.
+- **Project is the main entry point**: `Project` owns AssetBin, OTIOTimeline, ChecklistManager. `project.rag_loop()` runs a blocking async LLM loop. `project.to_dict()` / `Project.from_dict()` for JSON persistence.
 - **API keys excluded from serialization**: `LLMConfig.to_dict()` omits `api_key`. Re-inject via `from_dict(data, api_key=...)`.
-- **Job event broadcasting**: `job.stream()` returns an `AsyncIterator[Event]` via per-subscriber `asyncio.Queue`. Multiple SSE listeners supported.
-- **Token streaming**: Executor uses `get_streaming_chat_message_contents()` and emits `token` events through the event emitter.
 
 ## Server persistence
 
 openagv is a library, not a server. The server (e.g. FastAPI) is responsible for storing and loading projects. The intended pattern:
 
-**Saving**: Call `project.to_dict()` → store the resulting dict as JSON/JSONB in your database. The dict contains everything needed to reconstruct the project: asset bin, timeline (embedded OTIO), checklist, jobs, chat history, system prompt, LLM config (minus `api_key`), and analysis config. Media files live in the `StorageBackend`, not in the dict.
+**Saving**: Call `project.to_dict()` → store the resulting dict as JSON/JSONB in your database. The dict contains everything needed to reconstruct the project: asset bin, timeline (embedded OTIO), checklist, chat history, system prompt, LLM config (minus `api_key`), and analysis config. Media files live in the `StorageBackend`, not in the dict.
 
 **Loading**: Call `Project.from_dict(data, api_key=..., storage=...)` to reconstruct. The server must re-inject two runtime concerns:
 1. `api_key` — excluded from serialization for security. Pass it from your secrets store.
@@ -67,9 +65,7 @@ openagv is a library, not a server. The server (e.g. FastAPI) is responsible for
     timelines/     # exported .otio files
 ```
 
-**Chat history**: `project.chat_history` persists user/agent messages across jobs, giving the LLM conversational context when a new job starts. Serialized in `to_dict()`. Distinct from per-job `job.chat_history` which tracks a single execution's messages.
-
-**Event types**: Use the `EventType` enum from `job.py` for event type constants. It's a `str` enum so values serialize as plain strings (`"token"`, `"completed"`, etc.).
+**Chat history**: `project.chat_history` persists user/agent messages, giving the LLM conversational context. Serialized in `to_dict()`.
 
 ## Style
 
